@@ -1,0 +1,10 @@
+*.png
+*.gif
+*.jpg
+*.jpeg
+*.pth
+*.pyc
+*.pyo
+*.npz
+*.weights
+*.mp4
