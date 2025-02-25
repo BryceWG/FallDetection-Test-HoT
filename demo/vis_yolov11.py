@@ -256,14 +256,18 @@ def convert_yolov11_to_hrnet_scores(scores):
 
 
 def show2Dpose(kps, img):
-    colors = [(138, 201, 38),
-              (25, 130, 196),
-              (255, 202, 58)] 
+    # 定义颜色: 绿色(左侧), 黄色(右侧), 蓝色(中线)
+    colors = [(138, 201, 38),    # 绿色 - 左侧
+              (25, 130, 196),    # 蓝色 - 中线
+              (255, 202, 58)]    # 黄色 - 右侧
 
+    # 定义连接关系
     connections = [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5],
                    [5, 6], [0, 7], [7, 8], [8, 9], [9, 10],
                    [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16]]
 
+    # 定义左右侧: 1=左侧, 2=右侧, 3=中线
+    # 修改LR数组,使左侧(1)使用绿色,右侧(2)使用黄色,中线(3)使用蓝色
     LR = [3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
 
     thickness = 3
@@ -283,13 +287,15 @@ def show2Dpose(kps, img):
 def show3Dpose(vals, ax, fix_z):
     ax.view_init(elev=15., azim=70)
 
-    colors = [(138/255, 201/255, 38/255),
-            (255/255, 202/255, 58/255),
-            (25/255, 130/255, 196/255)]
+    # 定义颜色: 绿色(左侧), 黄色(右侧), 蓝色(中线)
+    colors = [(138/255, 201/255, 38/255),  # 绿色 - 左侧
+              (255/255, 202/255, 58/255),  # 黄色 - 右侧
+              (25/255, 130/255, 196/255)]  # 蓝色 - 中线
 
     I = np.array( [0, 0, 1, 4, 2, 5, 0, 7,  8,  8, 14, 15, 11, 12, 8,  9])
     J = np.array( [1, 4, 2, 5, 3, 6, 7, 8, 14, 11, 15, 16, 12, 13, 9, 10])
 
+    # 定义左右侧: 1=左侧, 2=右侧, 3=中线
     LR = [3, 3, 3, 3, 3, 3, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1]
 
     for i in np.arange( len(I) ):
@@ -322,7 +328,7 @@ def show3Dpose(vals, ax, fix_z):
     ax.tick_params('z', labelleft = False)
 
 
-def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False):
+def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thresh=0.5):
     """
     使用YOLO v11 Pose模型从视频中提取2D姿态
     
@@ -331,6 +337,7 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False):
         output_dir: 输出目录
         model_path: YOLO模型路径
         debug: 是否保存转换前后的关键点对比图
+        conf_thresh: 关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点
     """
     # 加载YOLO v11 Pose模型
     model = YOLO(model_path)
@@ -363,6 +370,13 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False):
             # 分离坐标和置信度
             kpts_xy = keypoints[:, :2]  # [17, 2]
             scores = keypoints[:, 2]  # [17]
+            
+            # 应用置信度阈值过滤
+            if len(all_keypoints) > 0:
+                # 对于低置信度的关键点,使用上一帧的对应关键点
+                low_conf_mask = scores < conf_thresh
+                kpts_xy[low_conf_mask] = all_keypoints[-1][low_conf_mask]
+                scores[low_conf_mask] = all_scores[-1][low_conf_mask]
             
             all_keypoints.append(kpts_xy)
             all_scores.append(scores)
@@ -651,6 +665,7 @@ if __name__ == "__main__":
     parser.add_argument('--fix_z', action='store_true', help='固定z轴')
     parser.add_argument('--yolo_model', type=str, default='yolo11n-pose.pt', help='YOLO v11 Pose模型路径')
     parser.add_argument('--debug', action='store_true', help='保存转换前后的关键点对比图')
+    parser.add_argument('--conf_thresh', type=float, default=0.5, help='关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点')
 
     args = parser.parse_args()
 
@@ -661,7 +676,7 @@ if __name__ == "__main__":
     output_dir = './demo/output/' + video_name + '/'
     
     # 使用YOLO v11 Pose模型获取2D姿态
-    get_pose2D_yolov11(video_path, output_dir, args.yolo_model, args.debug)
+    get_pose2D_yolov11(video_path, output_dir, args.yolo_model, args.debug, args.conf_thresh)
     
     # 使用现有的3D姿态重建模型
     get_pose3D(video_path, output_dir, args.fix_z)
