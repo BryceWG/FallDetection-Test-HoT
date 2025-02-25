@@ -100,26 +100,33 @@ def convert_yolov11_to_hrnet_keypoints(keypoints):
         # 6: 左脚踝(Left ankle)
         new_kpts[6] = kpts[left_ankle]
         
-        # 7: 脊柱(Spine/Mid-back)
+        # 计算颈部位置(颈部是左右肩膀的中点)
         neck = (kpts[left_shoulder] + kpts[right_shoulder]) / 2
-        new_kpts[7] = (new_kpts[0] + neck) / 2
+        
+        # 7: 脊柱(Spine/Mid-back) - 改进的估算方法
+        # 脊柱位置是髋部中点向颈部方向移动1/3的距离
+        hip_center = new_kpts[0]
+        spine_vector = neck - hip_center
+        new_kpts[7] = hip_center + spine_vector * (1/3)  # 髋部中点向颈部移动1/3的距离
         
         # 8: 颈部(Neck)
         new_kpts[8] = neck
         
-        # 9: 头部(Head) - 使用鼻子位置
-        new_kpts[9] = kpts[nose]
+        # 9: 头部(Head) - 改进的估算方法
+        # 使用左右眼的中心位置
+        eyes_center = (kpts[left_eye] + kpts[right_eye]) / 2
+        new_kpts[9] = eyes_center
         
-        # 10: 头顶(Head top) - 估算位置
-        # 基于鼻子和颈部位置估算头顶位置
-        head_direction = kpts[nose] - new_kpts[8]  # 从颈部到鼻子的向量
+        # 10: 头顶(Head top) - 改进的估算方法
+        # 基于眼睛中心和颈部位置计算头顶
+        head_direction = eyes_center - neck  # 从颈部到眼睛中心的向量
         head_length = np.linalg.norm(head_direction)
         if head_length > 0:
             head_direction = head_direction / head_length  # 单位向量
-            new_kpts[10] = kpts[nose] + head_direction * head_length * 0.8  # 延长约80%
+            new_kpts[10] = eyes_center + head_direction * head_length  # 从眼睛中心延伸与眼睛到颈部相同的距离
         else:
-            # 如果颈部和鼻子重合,使用垂直方向
-            new_kpts[10] = kpts[nose] + np.array([0, -head_length * 0.8 if head_length > 0 else -15])
+            # 如果颈部和眼睛中心重合,使用垂直方向
+            new_kpts[10] = eyes_center + np.array([0, -15])  # 向上15个像素
         
         # 11: 左肩膀(Left shoulder)
         new_kpts[11] = kpts[left_shoulder]
@@ -266,20 +273,29 @@ def show2Dpose(kps, img):
                    [5, 6], [0, 7], [7, 8], [8, 9], [9, 10],
                    [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16]]
 
-    # 定义左右侧: 1=左侧, 2=右侧, 3=中线
-    # 修改LR数组,使左侧(1)使用绿色,右侧(2)使用黄色,中线(3)使用蓝色
-    LR = [3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+    # 定义左右侧: 1=左侧(绿色), 2=右侧(黄色), 3=中线(蓝色)
+    # 根据人体解剖学正确分配颜色:
+    # 0-1, 1-2, 2-3: 右腿 - 右侧色
+    # 0-4, 4-5, 5-6: 左腿 - 左侧色
+    # 0-7, 7-8, 8-9, 9-10: 脊柱和头部 - 中线色
+    # 8-11, 11-12, 12-13: 左臂 - 左侧色
+    # 8-14, 14-15, 15-16: 右臂 - 右侧色
+    LR = [2, 2, 2, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 2, 2, 2]
 
     thickness = 3
 
+    # 首先绘制连接线
     for j,c in enumerate(connections):
         start = map(int, kps[c[0]])
         end = map(int, kps[c[1]])
         start = list(start)
         end = list(end)
         cv2.line(img, (start[0], start[1]), (end[0], end[1]), colors[LR[j]-1], thickness)
-        cv2.circle(img, (start[0], start[1]), thickness=-1, color=colors[LR[j]-1], radius=3)
-        cv2.circle(img, (end[0], end[1]), thickness=-1, color=colors[LR[j]-1], radius=3)
+    
+    # 然后绘制关节点,使用红色增强可见度
+    for i in range(len(kps)):
+        point = tuple(map(int, kps[i]))
+        cv2.circle(img, point, radius=5, color=(0, 0, 255), thickness=-1)
 
     return img
 
@@ -295,12 +311,23 @@ def show3Dpose(vals, ax, fix_z):
     I = np.array( [0, 0, 1, 4, 2, 5, 0, 7,  8,  8, 14, 15, 11, 12, 8,  9])
     J = np.array( [1, 4, 2, 5, 3, 6, 7, 8, 14, 11, 15, 16, 12, 13, 9, 10])
 
-    # 定义左右侧: 1=左侧, 2=右侧, 3=中线
-    LR = [3, 3, 3, 3, 3, 3, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1]
+    # 定义左右侧: 1=左侧(绿色), 2=右侧(黄色), 3=中线(蓝色)
+    # 根据人体解剖学正确分配颜色:
+    # 0-1, 0-4: 髋部连接
+    # 1-2, 2-3: 右腿
+    # 4-5, 5-6: 左腿
+    # 0-7, 7-8, 8-9, 9-10: 脊柱和头部
+    # 8-11, 11-12, 12-13: 左臂
+    # 8-14, 14-15, 15-16: 右臂
+    LR = [2, 1, 2, 1, 2, 1, 3, 3, 2, 1, 2, 2, 1, 1, 3, 3]
 
     for i in np.arange( len(I) ):
         x, y, z = [np.array( [vals[I[i], j], vals[J[i], j]] ) for j in range(3)]
         ax.plot(x, y, z, lw=3, color = colors[LR[i]-1])
+        
+    # 添加关节点标记
+    for i in range(vals.shape[0]):
+        ax.scatter(vals[i,0], vals[i,1], vals[i,2], color='red', s=50)
 
     RADIUS = 0.72
 
