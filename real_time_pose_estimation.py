@@ -25,7 +25,8 @@ from model.mixste.hot_mixste import Model
 frame_queue = queue.Queue(maxsize=10)
 keypoints_queue = queue.Queue(maxsize=10)
 pose_3d_queue = queue.Queue(maxsize=10)
-visualization_queue = queue.Queue(maxsize=5)
+visualization_2d_queue = queue.Queue(maxsize=5)  # 分离2D可视化队列
+visualization_3d_queue = queue.Queue(maxsize=5)  # 分离3D可视化队列
 stop_event = threading.Event()
 
 class PoseEstimator:
@@ -53,6 +54,9 @@ class PoseEstimator:
         print(f"可视化模式: {'启用' if self.visualization_mode else '禁用'}")
         print(f"3D更新最小帧率: {args.min_3d_update_fps} FPS")
         print(f"处理每 {self.process_every_n_frames} 帧")
+        print(f"结果保存: {'启用' if self.save_results else '禁用'}")
+        if self.save_results:
+            print(f"输出目录: {self.output_dir}")
         if self.fps_limit > 0:
             print(f"视频帧率限制: {self.fps_limit} FPS")
         print(f"==============\n")
@@ -274,22 +278,39 @@ class PoseEstimator:
         self.mixste_time = time.time() - start_time
         return output_3d
         
-    def create_visualization(self, frame, keypoints_2d, pose_3d):
+    def create_2d_visualization(self, frame, keypoints_2d):
         """
-        创建可视化结果
+        创建2D可视化
         
         参数:
             frame: 原始图像帧
             keypoints_2d: 2D关键点，形状为[17, 2]
-            pose_3d: 3D姿态，形状为[17, 3]
             
         返回:
-            combined_img: 组合可视化图像
+            vis_2d: 2D可视化图像
         """
         # 创建2D姿态可视化
         vis_2d = frame.copy()
         vis_2d = show2Dpose(keypoints_2d, vis_2d)
         
+        # 添加性能信息
+        fps_text = f"系统帧率: {1.0/self.frame_time:.1f} FPS"
+        yolo_text = f"YOLO处理速度: {1.0/self.yolo_time:.1f} FPS"
+        cv2.putText(vis_2d, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(vis_2d, yolo_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        return vis_2d
+        
+    def create_3d_visualization(self, pose_3d):
+        """
+        创建3D可视化
+        
+        参数:
+            pose_3d: 3D姿态，形状为[17, 3]
+            
+        返回:
+            vis_3d: 3D可视化图像
+        """
         # 创建3D姿态可视化
         self.ax.clear()
         pose_3d_world = camera_to_world(pose_3d.copy(), R=self.rot, t=0)
@@ -304,22 +325,13 @@ class PoseEstimator:
         vis_3d = np.array(self.canvas.buffer_rgba())
         vis_3d = cv2.cvtColor(vis_3d, cv2.COLOR_RGBA2BGR)
         
-        # 调整尺寸以匹配
-        target_height = vis_2d.shape[0]
-        vis_3d = cv2.resize(vis_3d, (int(vis_3d.shape[1] * target_height / vis_3d.shape[0]), target_height))
-        
-        # 水平拼接图像
-        combined_img = np.hstack((vis_2d, vis_3d))
-        
         # 添加性能信息
-        fps_text = f"帧率: {1.0/self.frame_time:.1f} FPS"
-        yolo_text = f"YOLO: {1.0/self.yolo_time:.1f} FPS"
-        mixste_text = f"3D预测: {1.0/self.mixste_time:.1f} FPS"
-        cv2.putText(combined_img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(combined_img, yolo_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(combined_img, mixste_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        mixste_text = f"3D预测速度: {1.0/self.mixste_time:.1f} FPS"
+        # 在图像底部添加性能信息
+        cv2.putText(vis_3d, mixste_text, (10, vis_3d.shape[0] - 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
-        return combined_img
+        return vis_3d
         
     def save_results_to_file(self):
         """保存结果到文件"""
@@ -369,6 +381,11 @@ class PoseEstimator:
                 # 将结果放入队列
                 if not keypoints_queue.full():
                     keypoints_queue.put((frame, keypoints, scores))
+                    
+                # 创建2D可视化并放入队列
+                if self.visualization_mode and not visualization_2d_queue.full():
+                    vis_2d = self.create_2d_visualization(frame, keypoints)
+                    visualization_2d_queue.put(vis_2d)
                     
                 # 记录关键点用于保存
                 if self.save_results:
@@ -443,6 +460,11 @@ class PoseEstimator:
                     if not pose_3d_queue.full():
                         pose_3d_queue.put((frame, keypoints, pose_3d))
                         
+                    # 创建3D可视化并放入队列
+                    if self.visualization_mode and not visualization_3d_queue.full():
+                        vis_3d = self.create_3d_visualization(pose_3d)
+                        visualization_3d_queue.put(vis_3d)
+                        
                     # 记录3D姿态用于保存
                     if self.save_results:
                         self.all_poses_3d.append(pose_3d)
@@ -455,29 +477,6 @@ class PoseEstimator:
                 import traceback
                 traceback.print_exc()
                 
-    def visualization_thread(self):
-        """可视化线程"""
-        if not self.visualization_mode:
-            return
-            
-        while not stop_event.is_set():
-            try:
-                if pose_3d_queue.empty():
-                    time.sleep(0.01)
-                    continue
-                    
-                frame, keypoints, pose_3d = pose_3d_queue.get()
-                
-                # 创建可视化图像
-                vis_img = self.create_visualization(frame, keypoints, pose_3d)
-                
-                # 添加到队列
-                if not visualization_queue.full():
-                    visualization_queue.put(vis_img)
-                    
-            except Exception as e:
-                print(f"可视化线程出错: {e}")
-                
     def run(self):
         """运行姿态估计pipeline"""
         self.setup_camera()
@@ -486,9 +485,6 @@ class PoseEstimator:
         threads = []
         threads.append(threading.Thread(target=self.extract_2d_pose_thread))
         threads.append(threading.Thread(target=self.predict_3d_pose_thread))
-        
-        if self.visualization_mode:
-            threads.append(threading.Thread(target=self.visualization_thread))
             
         for thread in threads:
             thread.daemon = True
@@ -525,12 +521,17 @@ class PoseEstimator:
                     frame_queue.put(frame)
                     
                 # 显示原始摄像头画面（不包含姿态标识）
-                cv2.imshow("摄像头", frame)
+                cv2.imshow("摄像头原始画面", frame)
                 
-                # 显示可视化结果
-                if self.visualization_mode and not visualization_queue.empty():
-                    vis_img = visualization_queue.get()
-                    cv2.imshow("姿态估计可视化", vis_img)
+                # 显示2D可视化结果
+                if self.visualization_mode and not visualization_2d_queue.empty():
+                    vis_2d = visualization_2d_queue.get()
+                    cv2.imshow("2D姿态检测", vis_2d)
+                    
+                # 显示3D可视化结果（分离显示）
+                if self.visualization_mode and not visualization_3d_queue.empty():
+                    vis_3d = visualization_3d_queue.get()
+                    cv2.imshow("3D姿态重建", vis_3d)
                     
                 # 计算帧率
                 self.frame_time = time.time() - start_time
@@ -538,7 +539,7 @@ class PoseEstimator:
                 # 显示性能信息
                 fps = 1.0 / max(0.001, self.frame_time)  # 避免除以零
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
-                    print(f"\r当前帧率: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                    print(f"\r主循环帧率: {fps:.1f} FPS | YOLO速度: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D预测速度: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
                 
                 # 检查退出
                 if cv2.waitKey(1) & 0xFF == ord('q'):
