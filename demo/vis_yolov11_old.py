@@ -24,7 +24,6 @@ from common.utils import *
 from common.camera import *
 from model.mixste.hot_mixste import Model
 
-
 def convert_yolov11_to_hrnet_keypoints(keypoints):
     """
     将YOLOv11 pose关键点格式转换为HRNet关键点格式
@@ -112,21 +111,16 @@ def convert_yolov11_to_hrnet_keypoints(keypoints):
         # 8: 颈部(Neck)
         new_kpts[8] = neck
         
-        # 9: 头部(Head) - 改进的估算方法
-        # 使用左右眼的中心位置
+        # 计算双眼中点
         eyes_center = (kpts[left_eye] + kpts[right_eye]) / 2
-        new_kpts[9] = eyes_center
         
-        # 10: 头顶(Head top) - 改进的估算方法
-        # 基于眼睛中心和颈部位置计算头顶
-        head_direction = eyes_center - neck  # 从颈部到眼睛中心的向量
-        head_length = np.linalg.norm(head_direction)
-        if head_length > 0:
-            head_direction = head_direction / head_length  # 单位向量
-            new_kpts[10] = eyes_center + head_direction * head_length  # 从眼睛中心延伸与眼睛到颈部相同的距离
-        else:
-            # 如果颈部和眼睛中心重合,使用垂直方向
-            new_kpts[10] = eyes_center + np.array([0, -15])  # 向上15个像素
+        # 9: 头部(Head) - 修正的估算方法
+        # 头部位置应该在"双眼连线中点与颈部中点"连线的中点位置
+        new_kpts[9] = (eyes_center + neck) / 2  # 双眼中点和颈部的中点
+        
+        # 10: 头顶(Head top) - 修正的估算方法
+        # 头顶应该在双眼连线的中点位置
+        new_kpts[10] = eyes_center
         
         # 11: 左肩膀(Left shoulder)
         new_kpts[11] = kpts[left_shoulder]
@@ -233,11 +227,14 @@ def convert_yolov11_to_hrnet_scores(scores):
         # 8: 颈部(Neck)
         new_scores[8] = neck_conf
         
-        # 9: 头部(Head) - 使用鼻子置信度
-        new_scores[9] = s[nose]
+        # 9: 头部(Head) - 修正的估算方法
+        # 使用左右眼的平均置信度和颈部置信度的最小值
+        eyes_conf = (s[left_eye] + s[right_eye]) / 2
+        new_scores[9] = min(eyes_conf, neck_conf)
         
-        # 10: 头顶(Head top) - 估算位置的置信度,使用鼻子置信度
-        new_scores[10] = s[nose] * 0.8  # 略低于鼻子置信度
+        # 10: 头顶(Head top) - 修正的估算方法
+        # 使用左右眼的平均置信度
+        new_scores[10] = eyes_conf
         
         # 11: 左肩膀(Left shoulder)
         new_scores[11] = s[left_shoulder]
@@ -430,7 +427,6 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
         # 读取第一帧进行可视化
         cap = cv2.VideoCapture(video_path)
         ret, frame = cap.read()
-        cap.release()
         
         if ret:
             # 绘制YOLOv11原始关键点
@@ -443,6 +439,26 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
                 cv2.circle(original_vis, pt2, 3, (0, 0, 255), -1)
             
             cv2.imwrite(debug_dir + 'original_keypoints.png', original_vis)
+            
+            # 保存更多帧进行调试
+            for i in range(min(5, len(all_keypoints))):  # 保存前5帧
+                if i > 0:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                        
+                    # 绘制当前帧的关键点
+                    frame_vis = frame.copy()
+                    for j, c in enumerate([[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [9, 12], [12, 13], [13, 14], [9, 15], [15, 16]]):
+                        pt1 = tuple(map(int, all_keypoints[i][c[0]]))
+                        pt2 = tuple(map(int, all_keypoints[i][c[1]]))
+                        cv2.line(frame_vis, pt1, pt2, (0, 255, 0), 2)
+                        cv2.circle(frame_vis, pt1, 3, (0, 0, 255), -1)
+                        cv2.circle(frame_vis, pt2, 3, (0, 0, 255), -1)
+                    
+                    cv2.imwrite(debug_dir + f'frame_{i}_original.png', frame_vis)
+        
+        cap.release()
     
     # 将YOLOv11 Pose的关键点转换为HRNet格式
     converted_keypoints = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
@@ -453,7 +469,6 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
         # 读取第一帧进行可视化
         cap = cv2.VideoCapture(video_path)
         ret, frame = cap.read()
-        cap.release()
         
         if ret:
             # 绘制转换后的关键点
@@ -466,6 +481,42 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
             cv2.putText(comparison, "YOLOv11 原始关键点", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             cv2.putText(comparison, "转换后的关键点", (original_vis.shape[1] + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             cv2.imwrite(debug_dir + 'keypoints_comparison.png', comparison)
+            
+            # 创建专门突出显示头部关键点的图片
+            head_vis = frame.copy()
+            # 绘制关键点8(颈部)、9(头部中心)、10(头顶)
+            neck_point = tuple(map(int, converted_keypoints[0, 0, 8]))
+            head_point = tuple(map(int, converted_keypoints[0, 0, 9]))
+            head_top_point = tuple(map(int, converted_keypoints[0, 0, 10]))
+            
+            # 绘制颈部和头部的连线
+            cv2.line(head_vis, neck_point, head_point, (25, 130, 196), 2)  # 中线颜色
+            cv2.line(head_vis, head_point, head_top_point, (25, 130, 196), 2)  # 中线颜色
+            
+            # 绘制关键点
+            cv2.circle(head_vis, neck_point, 5, (0, 0, 255), -1)
+            cv2.circle(head_vis, head_point, 5, (0, 0, 255), -1)
+            cv2.circle(head_vis, head_top_point, 5, (0, 0, 255), -1)
+            
+            # 添加标签
+            cv2.putText(head_vis, "颈部(8)", (neck_point[0]+10, neck_point[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.putText(head_vis, "头部中心(9)", (head_point[0]+10, head_point[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.putText(head_vis, "头顶(10)", (head_top_point[0]+10, head_top_point[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            cv2.imwrite(debug_dir + 'head_keypoints.png', head_vis)
+            
+            # 保存更多帧进行调试
+            for i in range(1, min(5, len(all_keypoints))):  # 保存第1-4帧(第0帧已经保存)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                # 绘制当前帧的转换后关键点
+                frame_vis = frame.copy()
+                frame_vis = show2Dpose(converted_keypoints[0, i], frame_vis)
+                cv2.imwrite(debug_dir + f'frame_{i}_converted.png', frame_vis)
+        
+        cap.release()
     
     # 更新输出数组
     keypoints_array = converted_keypoints
