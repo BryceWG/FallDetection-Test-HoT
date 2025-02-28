@@ -283,8 +283,8 @@ class PoseEstimator:
         vis_2d = show2Dpose(keypoints_2d, vis_2d)
         
         # 添加性能信息
-        fps_text = f"系统帧率: {1.0/self.frame_time:.1f} FPS"
-        yolo_text = f"YOLO处理速度: {1.0/self.yolo_time:.1f} FPS"
+        fps_text = f"System Frame Rate: {1.0/self.frame_time:.1f} FPS"
+        yolo_text = f"YOLO Processing: {1.0/self.yolo_time:.1f} FPS"
         cv2.putText(vis_2d, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(vis_2d, yolo_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
@@ -315,7 +315,7 @@ class PoseEstimator:
         vis_3d = cv2.cvtColor(vis_3d, cv2.COLOR_RGBA2BGR)
         
         # 添加性能信息
-        mixste_text = f"3D预测速度: {1.0/self.mixste_time:.1f} FPS"
+        mixste_text = f"3D Prediction: {1.0/self.mixste_time:.1f} FPS"
         # 在图像底部添加性能信息
         cv2.putText(vis_3d, mixste_text, (10, vis_3d.shape[0] - 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -510,17 +510,17 @@ class PoseEstimator:
                     frame_queue.put(frame)
                     
                 # 显示原始摄像头画面（不包含姿态标识）
-                cv2.imshow("摄像头原始画面", frame)
+                cv2.imshow("Camera Feed", frame)
                 
                 # 显示2D可视化结果
                 if self.visualization_mode and not visualization_2d_queue.empty():
                     vis_2d = visualization_2d_queue.get()
-                    cv2.imshow("2D姿态检测", vis_2d)
+                    cv2.imshow("2D Pose Detection", vis_2d)
                     
                 # 显示3D可视化结果（分离显示）
                 if self.visualization_mode and not visualization_3d_queue.empty():
                     vis_3d = visualization_3d_queue.get()
-                    cv2.imshow("3D姿态重建", vis_3d)
+                    cv2.imshow("3D Pose Reconstruction", vis_3d)
                     
                 # 计算帧率
                 self.frame_time = time.time() - start_time
@@ -528,7 +528,7 @@ class PoseEstimator:
                 # 显示性能信息
                 fps = 1.0 / max(0.001, self.frame_time)  # 避免除以零
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
-                    print(f"\r显示帧率: {fps:.1f} FPS | YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                    print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
                 
                 # 检查退出
                 if cv2.waitKey(1) & 0xFF == ord('q'):
