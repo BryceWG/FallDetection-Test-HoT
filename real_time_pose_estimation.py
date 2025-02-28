@@ -230,6 +230,13 @@ class PoseEstimator:
         
         # 注意：输入关键点应该已经在predict_3d_pose_thread中处理过，确保长度为self.mixste_args.frames
         assert len(input_keypoints) == self.mixste_args.frames, f"输入帧数应为{self.mixste_args.frames}，实际为{len(input_keypoints)}"
+        
+        # 将输入关键点转换为需要的格式
+        input_keypoints_array = np.array(input_keypoints)[np.newaxis, ...]  # [1, F, 17, 2]
+        # 将YOLO关键点转换为HRNet格式
+        input_keypoints_converted = convert_yolov11_to_hrnet_keypoints(input_keypoints_array.copy())
+        # 使用转换后的关键点，取第一个批次
+        input_keypoints = input_keypoints_converted[0]
             
         # 归一化坐标
         input_2D = normalize_screen_coordinates(input_keypoints, w=self.frame_width, h=self.frame_height)
@@ -363,13 +370,18 @@ class PoseEstimator:
                 
                 keypoints, scores = self.extract_2d_pose(frame)
                 
+                # 将关键点格式转换为HRNet格式，方便后续处理和可视化
+                keypoints_array = np.array([keypoints])[np.newaxis, ...]  # [1, 1, 17, 2]
+                keypoints_converted = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
+                keypoints_vis = keypoints_converted[0, 0]  # 获取转换后的单帧关键点 [17, 2]
+                
                 # 将结果放入队列
                 if not keypoints_queue.full():
                     keypoints_queue.put((frame, keypoints, scores))
                     
                 # 创建2D可视化并放入队列
                 if self.visualization_mode and not visualization_2d_queue.full():
-                    vis_2d = self.create_2d_visualization(frame, keypoints)
+                    vis_2d = self.create_2d_visualization(frame, keypoints_vis)
                     visualization_2d_queue.put(vis_2d)
                     
                 # 记录关键点用于保存
@@ -443,7 +455,11 @@ class PoseEstimator:
                     
                     # 将结果放入队列
                     if not pose_3d_queue.full():
-                        pose_3d_queue.put((frame, keypoints, pose_3d))
+                        # 使用最新的一帧关键点(已转换格式)和3D姿态
+                        keypoints_array = np.array([buffer_keypoints[-1]])[np.newaxis, ...]  # [1, 1, 17, 2]
+                        keypoints_converted = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
+                        keypoints_vis = keypoints_converted[0, 0]  # 最新一帧的转换后关键点
+                        pose_3d_queue.put((frame, keypoints_vis, pose_3d))
                         
                     # 创建3D可视化并放入队列
                     if self.visualization_mode and not visualization_3d_queue.full():
