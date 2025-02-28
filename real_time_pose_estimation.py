@@ -38,11 +38,10 @@ class PoseEstimator:
             args: 命令行参数
         """
         self.args = args
-        self.device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.visualization_mode = args.visualization
         self.output_dir = args.output_dir
         self.save_results = args.save_results
-        self.process_every_n_frames = args.process_every_n_frames
         self.frame_counter = 0
         self.fps_limit = args.video_fps_limit
         
@@ -53,7 +52,6 @@ class PoseEstimator:
             print(f"CUDA设备: {torch.cuda.get_device_name(0)}")
         print(f"可视化模式: {'启用' if self.visualization_mode else '禁用'}")
         print(f"3D更新最小帧率: {args.min_3d_update_fps} FPS")
-        print(f"处理每 {self.process_every_n_frames} 帧")
         print(f"结果保存: {'启用' if self.save_results else '禁用'}")
         if self.save_results:
             print(f"输出目录: {self.output_dir}")
@@ -141,12 +139,8 @@ class PoseEstimator:
         """获取MixSTE模型参数"""
         args = argparse.Namespace()
         
-        # 根据用户设置确定帧数
-        if self.args.reduced_frames is not None:
-            frames = self.args.reduced_frames
-            print(f"使用减少的帧数: {frames}（性能优化模式）")
-        else:
-            frames = 243  # 默认使用243帧，与预训练模型匹配
+        # 使用默认帧数
+        frames = 243  # 默认使用243帧，与预训练模型匹配
             
         args.layers, args.channel, args.d_hid, args.frames = 8, 512, 1024, frames
         args.token_num, args.layer_index = 81, 3
@@ -160,20 +154,15 @@ class PoseEstimator:
         print(f"正在初始化摄像头 (ID: {self.args.camera_id})...")
         self.cap = cv2.VideoCapture(self.args.camera_id)
         
-        # 设置摄像头分辨率
-        if self.args.camera_width and self.args.camera_height:
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.args.camera_width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.args.camera_height)
-            
-        # 获取摄像头信息
-        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
         # 检查摄像头是否正常打开
         if not self.cap.isOpened():
             print("无法打开摄像头")
             sys.exit(1)
             
+        # 获取摄像头信息，不再手动设置分辨率
+        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
         print(f"摄像头初始化成功，分辨率: {self.frame_width}x{self.frame_height}")
         
     def release_resources(self):
@@ -372,10 +361,6 @@ class PoseEstimator:
                     
                 frame = frame_queue.get()
                 
-                # 根据process_every_n_frames决定是否处理该帧
-                if self.frame_counter % self.process_every_n_frames != 0:
-                    continue
-                
                 keypoints, scores = self.extract_2d_pose(frame)
                 
                 # 将结果放入队列
@@ -493,7 +478,11 @@ class PoseEstimator:
         try:
             print("开始实时姿态估计...")
             print("按 'q' 键退出")
-            
+            print("\n分离的处理线程：")
+            print("- 主循环：负责帧读取与显示")
+            print("- 2D提取线程：运行YOLO模型进行人体检测和关键点提取")
+            print("- 3D预测线程：运行MixSTE模型进行3D姿态重建\n")
+
             # 主循环
             while True:
                 start_time = time.time()
@@ -539,7 +528,7 @@ class PoseEstimator:
                 # 显示性能信息
                 fps = 1.0 / max(0.001, self.frame_time)  # 避免除以零
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
-                    print(f"\r主循环帧率: {fps:.1f} FPS | YOLO速度: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D预测速度: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                    print(f"\r显示帧率: {fps:.1f} FPS | YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
                 
                 # 检查退出
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -569,10 +558,7 @@ def parse_args():
     
     # 基本参数
     parser.add_argument('--camera_id', type=int, default=0, help='摄像头ID')
-    parser.add_argument('--camera_width', type=int, default=1280, help='摄像头宽度')
-    parser.add_argument('--camera_height', type=int, default=720, help='摄像头高度')
     parser.add_argument('--output_dir', type=str, default='./output', help='输出目录')
-    parser.add_argument('--cpu', action='store_true', help='强制使用CPU')
     
     # 模型参数
     parser.add_argument('--yolo_model', type=str, default='yolo11n-pose.pt', help='YOLO模型路径')
@@ -586,12 +572,8 @@ def parse_args():
                        help='3D姿态更新的最小帧率，实际更新频率可能更低')
     
     # 性能参数
-    parser.add_argument('--reduced_frames', type=int, default=None, 
-                       help='使用减少的帧数进行预测（比如设置为81），性能更好但可能稍微降低准确性')
     parser.add_argument('--min_frames_to_start', type=int, default=30,
                        help='开始3D预测所需的最小帧数')
-    parser.add_argument('--process_every_n_frames', type=int, default=1,
-                       help='每N帧处理一次，可以提高性能')
     
     # 其他参数
     parser.add_argument('--conf_thresh', type=float, default=0.5, 
