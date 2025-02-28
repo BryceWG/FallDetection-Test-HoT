@@ -184,6 +184,26 @@ def pose2d_thread(args, frame_buffer):
         pose2d_frame = frame.copy()
         pose2d_frame = show2Dpose(converted_keypoints[0, 0], pose2d_frame)
         
+        # 添加关节点序号
+        for i, kpt in enumerate(converted_keypoints[0, 0]):
+            x, y = map(int, kpt)
+            # 在关节点右下角显示序号，使用黑色背景增加可读性
+            text = str(i)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            thickness = 1
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+            
+            # 绘制黑色背景矩形
+            cv2.rectangle(pose2d_frame, 
+                         (x + 5, y + 5), 
+                         (x + text_size[0] + 10, y + text_size[1] + 10),
+                         (0, 0, 0), -1)
+            
+            # 绘制白色文字
+            cv2.putText(pose2d_frame, text, (x + 8, y + text_size[1] + 7),
+                       font, font_scale, (255, 255, 255), thickness)
+        
         # 添加FPS信息
         cv2.putText(pose2d_frame, f"2D FPS: {fps_stats['2d_pose']}", (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
@@ -402,20 +422,16 @@ def display_thread(args, frame_buffer):
     """显示线程"""
     global stop_signal, fps_stats
     
-    # 创建显示窗口
-    cv2.namedWindow("原始视频", cv2.WINDOW_NORMAL)
-    cv2.namedWindow("2D姿态", cv2.WINDOW_NORMAL)
-    cv2.namedWindow("3D姿态", cv2.WINDOW_NORMAL)
+    # 创建并配置显示窗口
+    window_names = ["原始视频", "2D姿态", "3D姿态"]
+    window_positions = [(50, 50), (700, 50), (50, 550)]
+    window_size = (640, 480)
     
-    # 调整窗口大小
-    cv2.resizeWindow("原始视频", 640, 480)
-    cv2.resizeWindow("2D姿态", 640, 480)
-    cv2.resizeWindow("3D姿态", 640, 480)
-    
-    # 移动窗口位置
-    cv2.moveWindow("原始视频", 50, 50)
-    cv2.moveWindow("2D姿态", 700, 50)
-    cv2.moveWindow("3D姿态", 50, 550)
+    # 只创建一次窗口
+    for name, pos in zip(window_names, window_positions):
+        cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(name, *window_size)
+        cv2.moveWindow(name, *pos)
     
     while not stop_signal:
         # 获取显示帧
@@ -429,13 +445,13 @@ def display_thread(args, frame_buffer):
             display_frame = raw_frame.copy()
             cv2.putText(display_frame, f"摄像头 FPS: {fps_stats['capture']}", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.imshow("原始视频", display_frame)
+            cv2.imshow(window_names[0], display_frame)
             
         if pose2d_frame is not None:
-            cv2.imshow("2D姿态", pose2d_frame)
+            cv2.imshow(window_names[1], pose2d_frame)
             
         if pose3d_frame is not None:
-            cv2.imshow("3D姿态", pose3d_frame)
+            cv2.imshow(window_names[2], pose3d_frame)
             
         # 检查退出键
         key = cv2.waitKey(1)
