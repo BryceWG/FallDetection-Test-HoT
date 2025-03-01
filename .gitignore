@@ -8,3 +8,4 @@
 *.npz
 *.weights
 *.mp4
+*.code-workspace

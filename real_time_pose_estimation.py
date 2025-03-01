@@ -46,6 +46,21 @@ class PoseEstimator:
         self.fps_limit = args.video_fps_limit
         self.use_opencv_render = args.use_opencv_render  # 使用OpenCV渲染标志
         
+        # 初始化模型
+        self._init_yolo_model()
+        self._init_mixste_model()
+        
+        # 滑动窗口相关参数(在模型初始化后设置)
+        self.use_sliding_window = args.use_sliding_window
+        self.slide_step = args.slide_step
+        self.center_frames = args.center_frames
+        self.adaptive_step = args.adaptive_step
+        self.sliding_window_buffer = []  # 滑动窗口缓冲区
+        self.is_warmup_complete = False  # 预热完成标志
+        self.processed_frames = 0  # 已处理的帧数
+        self.window_delay_frames = self.mixste_args.frames // 2  # 窗口延迟帧数(约121帧)
+        self.processing_time_history = []  # 用于记录处理时间历史
+        
         # 打印重要的配置信息
         print(f"\n=== 系统配置 ===")
         print(f"设备: {self.device}")
@@ -54,6 +69,12 @@ class PoseEstimator:
         print(f"可视化模式: {'启用' if self.visualization_mode else '禁用'}")
         print(f"3D渲染方式: {'OpenCV (快速)' if self.use_opencv_render else 'Matplotlib (详细)'}")
         print(f"3D更新最小帧率: {args.min_3d_update_fps} FPS")
+        print(f"滑动窗口策略: {'启用' if self.use_sliding_window else '禁用'}")
+        if self.use_sliding_window:
+            print(f"  - 滑动步长: {self.slide_step} 帧")
+            print(f"  - 中心输出帧: {self.center_frames} 帧")
+            print(f"  - 自适应步长: {'启用' if self.adaptive_step else '禁用'}")
+            print(f"  - 初始延迟: 约 {self.mixste_args.frames / 30:.1f} 秒 (30FPS情况下)")
         print(f"结果保存: {'启用' if self.save_results else '禁用'}")
         if self.save_results:
             print(f"输出目录: {self.output_dir}")
@@ -69,10 +90,6 @@ class PoseEstimator:
             if self.visualization_mode:
                 os.makedirs(os.path.join(self.output_dir, 'pose2D'), exist_ok=True)
                 os.makedirs(os.path.join(self.output_dir, 'pose3D'), exist_ok=True)
-        
-        # 初始化模型
-        self._init_yolo_model()
-        self._init_mixste_model()
         
         # 摄像头设置
         self.cap = None
@@ -179,6 +196,43 @@ class PoseEstimator:
         
     def release_resources(self):
         """释放资源"""
+        # 滑动窗口模式下，处理缓冲区中的剩余帧
+        if self.use_sliding_window and self.is_warmup_complete:
+            # 检查是否有未处理完的帧
+            remaining_frames = len(self.sliding_window_buffer) - self.processed_frames
+            if remaining_frames > self.mixste_args.frames:
+                print("\n检测到退出请求，正在完成剩余帧处理...")
+                
+                # 设置处理上限，避免处理太多帧
+                max_process = min(remaining_frames, 100)  # 最多处理100帧
+                
+                # 创建进度条
+                for i in range(0, max_process, self.slide_step):
+                    # 计算当前步骤的窗口起始位置
+                    start_idx = self.processed_frames + i
+                    
+                    # 确保有足够的帧
+                    if start_idx + self.mixste_args.frames <= len(self.sliding_window_buffer):
+                        # 提取当前窗口
+                        current_window = self.sliding_window_buffer[start_idx:start_idx + self.mixste_args.frames]
+                        
+                        # 预测当前窗口的3D姿态
+                        pose_3d = self.predict_3d_pose(np.array(current_window))
+                        
+                        # 记录3D姿态用于保存
+                        if self.save_results:
+                            self.all_poses_3d.append(pose_3d)
+                            
+                        # 更新处理进度
+                        self.processed_frames += self.slide_step
+                        
+                        # 显示进度
+                        progress = (i + self.slide_step) / max_process * 100
+                        sys.stdout.write(f"\r处理剩余帧: {progress:.1f}% 完成")
+                        sys.stdout.flush()
+                
+                print("\n剩余帧处理完成!")
+        
         if self.cap and self.cap.isOpened():
             self.cap.release()
         cv2.destroyAllWindows()
@@ -452,32 +506,65 @@ class PoseEstimator:
         time_since_last_update = time.time() - self.last_3d_update
         
         # 添加性能信息到图像
-        mixste_text = f"3D Prediction: {1.0/self.mixste_time:.1f} FPS"
-        render_text = f"Render Method: OpenCV ({current_render_time*1000:.1f}ms)"
-        update_text = f"Last Update: {time_since_last_update:.2f}s ago"
-        refresh_rate = f"Refresh Rate: {1.0/max(0.01, time_since_last_update):.1f} FPS"
-        render_fps_text = f"Pure Render: {1.0/max(0.001, current_render_time):.1f} FPS"
+        mixste_text = f"3D预测: {1.0/self.mixste_time:.1f} FPS"
+        render_text = f"渲染方法: OpenCV ({current_render_time*1000:.1f}ms)"
+        update_text = f"上次更新: {time_since_last_update:.2f}s前"
+        refresh_rate = f"刷新率: {1.0/max(0.01, time_since_last_update):.1f} FPS"
+        render_fps_text = f"纯渲染速度: {1.0/max(0.001, current_render_time):.1f} FPS"
+        
+        # 滑动窗口模式特有信息
+        if self.use_sliding_window:
+            mode_text = f"模式: 滑动窗口 (高质量, 延迟较高)"
+            if self.is_warmup_complete:
+                # 计算延迟信息
+                frames_delay = self.processed_frames - self.slide_step + self.window_delay_frames
+                delay_seconds = frames_delay / 30.0  # 假设30FPS
+                delay_text = f"系统延迟: 约{delay_seconds:.1f}秒 ({frames_delay}帧)"
+                buffer_info = f"缓冲区: {len(self.sliding_window_buffer)}帧, 已处理: {self.processed_frames}帧"
+            else:
+                # 预热阶段
+                warmup_percent = min(100, len(self.sliding_window_buffer) / self.mixste_args.frames * 100)
+                delay_text = f"系统预热中: {warmup_percent:.1f}% ({len(self.sliding_window_buffer)}/{self.mixste_args.frames}帧)"
+                buffer_info = f"预计开始时间: {(self.mixste_args.frames - len(self.sliding_window_buffer)) / 30:.1f}秒后"
+        else:
+            mode_text = f"模式: 填充策略 (低延迟, 质量较低)"
+            delay_text = ""
+            buffer_info = ""
         
         # 添加半透明背景，使文字更容易阅读
         overlay = img.copy()
-        cv2.rectangle(overlay, (5, img.shape[0]-145), (350, img.shape[0]-5), (255, 255, 255), -1)
+        bg_height = 145
+        if self.use_sliding_window:
+            bg_height += 60  # 额外的空间给滑动窗口信息
+        cv2.rectangle(overlay, (5, img.shape[0]-bg_height), (350, img.shape[0]-5), (255, 255, 255), -1)
         cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
         
         # 添加文字
-        cv2.putText(img, mixste_text, (10, img.shape[0] - 110), 
+        base_y = img.shape[0] - bg_height + 30
+        cv2.putText(img, mixste_text, (10, base_y), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, render_text, (10, img.shape[0] - 80), 
+        cv2.putText(img, render_text, (10, base_y + 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, update_text, (10, img.shape[0] - 50), 
+        cv2.putText(img, update_text, (10, base_y + 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, refresh_rate, (10, img.shape[0] - 20), 
+        cv2.putText(img, refresh_rate, (10, base_y + 90), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, render_fps_text, (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # 添加滑动窗口模式特有信息
+        if self.use_sliding_window:
+            cv2.putText(img, mode_text, (10, base_y + 120), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(img, delay_text, (10, base_y + 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            if buffer_info:
+                cv2.putText(img, buffer_info, (10, base_y + 180), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # 添加更新时间戳
         timestamp = f"更新时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}"
-        cv2.putText(img, timestamp, (10, 60), 
+        cv2.putText(img, timestamp, (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(img, render_fps_text, (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         return img
@@ -569,13 +656,15 @@ class PoseEstimator:
                 
     def predict_3d_pose_thread(self):
         """3D姿态预测线程"""
-        buffer_keypoints = []
-        update_interval = max(0.05, 1.0 / (self.args.min_3d_update_fps * 2.5))  # 大幅减小更新间隔，提高刷新率
-        last_update = time.time()
-        render_time = 0.0  # 用于记录渲染时间
-        
         # 性能监控变量
         fps_history = []
+        render_time = 0.0  # 用于记录渲染时间
+        last_update = time.time()
+        processing_start_time = 0
+        
+        # 用于非滑动窗口模式的变量
+        buffer_keypoints = []
+        update_interval = max(0.05, 1.0 / (self.args.min_3d_update_fps * 2.5))  # 更新间隔，用于非滑动窗口模式
         
         while not stop_event.is_set():
             try:
@@ -589,7 +678,125 @@ class PoseEstimator:
                 # 检查关键点是否有效（所有值都为0表示无效）
                 is_valid_keypoints = not np.all(keypoints == 0)
                 
-                if is_valid_keypoints:
+                # 滑动窗口模式
+                if self.use_sliding_window and is_valid_keypoints:
+                    # 将有效关键点添加到滑动窗口缓冲区
+                    self.sliding_window_buffer.append(keypoints)
+                    
+                    # 检查是否处于预热阶段
+                    if not self.is_warmup_complete:
+                        # 提示预热进度
+                        warmup_progress = f"系统预热中... {len(self.sliding_window_buffer)}/{self.mixste_args.frames} 帧"
+                        # 清空队列
+                        with visualization_3d_queue.mutex:
+                            visualization_3d_queue.queue.clear()
+                        
+                        # 创建预热提示图像
+                        blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
+                        cv2.putText(blank_3d, warmup_progress, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        progress_percent = len(self.sliding_window_buffer) / self.mixste_args.frames * 100
+                        progress_bar = f"[{'#' * int(progress_percent/5)}{' ' * (20-int(progress_percent/5))}] {progress_percent:.1f}%"
+                        cv2.putText(blank_3d, progress_bar, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        estimated_time = (self.mixste_args.frames - len(self.sliding_window_buffer)) / 30
+                        time_text = f"预计剩余时间: {estimated_time:.1f} 秒"
+                        cv2.putText(blank_3d, time_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        visualization_3d_queue.put(blank_3d)
+                        
+                        # 检查是否收集了足够的帧
+                        if len(self.sliding_window_buffer) >= self.mixste_args.frames:
+                            print(f"\n预热完成! 收集了{len(self.sliding_window_buffer)}帧数据，开始进行3D姿态预测...")
+                            self.is_warmup_complete = True
+                            # 记录处理开始时间
+                            processing_start_time = time.time()
+                    
+                    # 自适应滑动步长计算（如果启用）
+                    if self.adaptive_step and len(self.processing_time_history) > 0:
+                        avg_processing_time = np.mean(self.processing_time_history[-5:])
+                        target_fps = 30  # 目标帧率
+                        if 1.0 / avg_processing_time < target_fps * 0.8:  # 如果处理速度低于目标帧率的80%
+                            # 动态增加步长，但不超过10帧
+                            self.slide_step = min(10, max(self.args.slide_step, int(avg_processing_time * target_fps * self.args.slide_step)))
+                        else:
+                            # 复原到默认步长
+                            self.slide_step = self.args.slide_step
+                    
+                    # 在预热完成后，每当积累足够的新帧时，进行滑动窗口处理
+                    if self.is_warmup_complete and len(self.sliding_window_buffer) >= self.processed_frames + self.slide_step:
+                        # 开始计时
+                        process_start = time.time()
+                        
+                        # 提取当前的滑动窗口（固定窗口大小为self.mixste_args.frames）
+                        start_idx = self.processed_frames
+                        # 确保我们有足够的帧
+                        if start_idx + self.mixste_args.frames <= len(self.sliding_window_buffer):
+                            # 提取当前窗口
+                            current_window = self.sliding_window_buffer[start_idx:start_idx + self.mixste_args.frames]
+                            
+                            # 预测当前窗口的3D姿态
+                            pose_3d = self.predict_3d_pose(np.array(current_window))
+                            
+                            # 更新处理进度
+                            self.processed_frames += self.slide_step
+                            
+                            # 记录处理时间
+                            process_time = time.time() - process_start
+                            self.processing_time_history.append(process_time)
+                            if len(self.processing_time_history) > 20:
+                                self.processing_time_history.pop(0)
+                                
+                            # 计算当前的延迟
+                            total_delay = time.time() - processing_start_time
+                            frames_delay = self.processed_frames - self.slide_step + self.window_delay_frames
+                            delay_seconds = frames_delay / 30.0  # 假设30FPS
+                            
+                            # 将结果放入队列
+                            if not pose_3d_queue.full():
+                                # 使用当前窗口中间帧的关键点和3D姿态
+                                mid_idx = self.mixste_args.frames // 2
+                                keypoints_vis = self.sliding_window_buffer[start_idx + mid_idx].copy()
+                                pose_3d_queue.put((frame, keypoints_vis, pose_3d))
+                            
+                            # 创建3D可视化并放入队列
+                            if self.visualization_mode:
+                                # 清空可视化队列，确保始终显示最新的渲染结果
+                                with visualization_3d_queue.mutex:
+                                    visualization_3d_queue.queue.clear()
+                                    
+                                render_start = time.time()
+                                vis_3d = self.create_3d_visualization(pose_3d)
+                                
+                                # 添加滑动窗口特有的信息叠加
+                                delay_text = f"系统延迟: {delay_seconds:.1f}秒 ({frames_delay}帧)"
+                                buffer_text = f"缓冲区: {len(self.sliding_window_buffer)}帧, 已处理: {self.processed_frames}帧"
+                                step_text = f"滑动步长: {self.slide_step}帧, 窗口大小: {self.mixste_args.frames}帧"
+                                proc_text = f"处理时间: {process_time*1000:.1f}ms ({1.0/process_time:.1f} FPS)"
+                                
+                                # 为文本添加半透明背景
+                                overlay = vis_3d.copy()
+                                cv2.rectangle(overlay, (5, 5), (400, 120), (255, 255, 255), -1)
+                                cv2.addWeighted(overlay, 0.7, vis_3d, 0.3, 0, vis_3d)
+                                
+                                # 添加信息
+                                cv2.putText(vis_3d, delay_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                cv2.putText(vis_3d, buffer_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                cv2.putText(vis_3d, step_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                cv2.putText(vis_3d, proc_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                
+                                # 计算渲染时间
+                                render_time = time.time() - render_start
+                                
+                                visualization_3d_queue.put(vis_3d)
+                            
+                            # 记录3D姿态用于保存
+                            if self.save_results:
+                                self.all_poses_3d.append(pose_3d)
+                                
+                            last_update = time.time()
+                            self.last_3d_update = time.time()
+                
+                # 原有的非滑动窗口处理逻辑
+                elif not self.use_sliding_window and is_valid_keypoints:
                     # 添加到缓冲区
                     buffer_keypoints.append(keypoints)
                     
@@ -674,23 +881,24 @@ class PoseEstimator:
                             
                         last_update = current_time
                         self.last_3d_update = current_time
-                else:
+                
+                # 处理无效关键点情况
+                elif self.visualization_mode:
                     # 如果没有有效关键点，清空可视化队列并放入一个空的3D可视化
-                    if self.visualization_mode:
-                        # 清空队列
-                        with visualization_3d_queue.mutex:
-                            visualization_3d_queue.queue.clear()
-                            
-                        # 创建一个显示"未检测到人体"的空白3D可视化
-                        blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                        status_text = "状态: 未检测到人体"
-                        cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        fps_text = f"3D渲染: {1.0/max(0.001, render_time):.1f} FPS"
-                        avg_fps_text = f"平均更新率: {np.mean(fps_history) if fps_history else 0:.1f} FPS"
-                        cv2.putText(blank_3d, fps_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.putText(blank_3d, avg_fps_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    # 清空队列
+                    with visualization_3d_queue.mutex:
+                        visualization_3d_queue.queue.clear()
                         
-                        visualization_3d_queue.put(blank_3d)
+                    # 创建一个显示"未检测到人体"的空白3D可视化
+                    blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
+                    status_text = "状态: 未检测到人体"
+                    cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    fps_text = f"3D渲染: {1.0/max(0.001, render_time):.1f} FPS"
+                    avg_fps_text = f"平均更新率: {np.mean(fps_history) if fps_history else 0:.1f} FPS"
+                    cv2.putText(blank_3d, fps_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.putText(blank_3d, avg_fps_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    visualization_3d_queue.put(blank_3d)
                 
             except Exception as e:
                 print(f"3D姿态预测线程出错: {e}")
@@ -808,7 +1016,7 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default='./output', help='输出目录')
     
     # 模型参数
-    parser.add_argument('--yolo_model', type=str, default='yolo11n-pose.pt', help='YOLO模型路径')
+    parser.add_argument('--yolo_model', type=str, default='yolo11s-pose.pt', help='YOLO模型路径')
     parser.add_argument('--mixste_model', type=str, default='checkpoint/pretrained/hot_mixste/model.pth', 
                        help='MixSTE模型路径')
     
@@ -818,6 +1026,16 @@ def parse_args():
     parser.add_argument('--use_opencv_render', action='store_true', help='使用OpenCV进行快速3D渲染')
     parser.add_argument('--min_3d_update_fps', type=float, default=15.0, 
                        help='3D姿态更新的最小目标帧率，更新间隔会相应调整')
+    
+    # 滑动窗口参数
+    parser.add_argument('--use_sliding_window', action='store_true', 
+                       help='使用滑动窗口策略代替填充策略，提升预测质量但会增加延迟')
+    parser.add_argument('--slide_step', type=int, default=5, 
+                       help='滑动窗口的步长（帧数）')
+    parser.add_argument('--center_frames', type=int, default=5, 
+                       help='每次滑动取中心的几帧作为有效输出')
+    parser.add_argument('--adaptive_step', action='store_true', 
+                       help='启用自适应步长，根据系统性能动态调整滑动步长')
     
     # 性能参数
     parser.add_argument('--min_frames_to_start', type=int, default=10,
@@ -839,6 +1057,5 @@ def main():
     estimator = PoseEstimator(args)
     estimator.run()
     
-
 if __name__ == "__main__":
     main() 
