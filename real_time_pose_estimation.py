@@ -823,30 +823,33 @@ class PoseEstimator:
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='实时姿态估计 - 使用固定243帧序列处理方案')
+    parser = argparse.ArgumentParser(description='Real-time Pose Estimation - Fixed 243-frame Sequence Processing')
     
-    # 基本参数
-    parser.add_argument('--camera_id', type=int, default=0, help='摄像头ID')
-    parser.add_argument('--output_dir', type=str, default='./output', help='输出目录')
+    # Basic Parameters
+    parser.add_argument('--camera_id', type=int, default=0, help='Camera device ID')
+    parser.add_argument('--output_dir', type=str, default='./output', help='Output directory for saving results')
     
-    # 模型参数
-    parser.add_argument('--yolo_model', type=str, default='yolo11s-pose.pt', help='YOLO模型路径')
+    # Model Parameters
+    parser.add_argument('--yolo_model', type=str, default='yolo11m-pose.pt', help='Path to YOLO model')
     parser.add_argument('--mixste_model', type=str, default='checkpoint/pretrained/hot_mixste/model.pth', 
-                       help='MixSTE模型路径')
+                       help='Path to MixSTE model')
     
-    # 可视化参数
-    parser.add_argument('--visualization', action='store_true', help='启用可视化模式')
-    parser.add_argument('--fix_z', action='store_true', help='固定z轴范围')
-    parser.add_argument('--use_opencv_render', action='store_true', help='使用OpenCV进行快速3D渲染')
+    # Visualization Parameters
+    parser.add_argument('--visualization', action='store_true', help='Enable visualization mode')
+    parser.add_argument('--fix_z', action='store_true', help='Fix Z-axis range in 3D visualization')
+    parser.add_argument('--use_opencv_render', action='store_true', help='Use OpenCV for fast 3D rendering')
     
-    # 其他参数
+    # Other Parameters
     parser.add_argument('--conf_thresh', type=float, default=0.5, 
-                       help='关键点置信度阈值，低于此值的关键点将使用上一帧的对应关键点')
-    parser.add_argument('--save_results', action='store_true', help='保存结果到文件')
-    parser.add_argument('--video_fps_limit', type=int, default=30,
-                       help='限制处理帧率，避免系统过载，设为0表示不限制')
+                       help='Confidence threshold for keypoints, below which previous frame keypoints will be used')
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Set default behaviors
+    args.save_results = True  # Always save results to file
+    args.video_fps_limit = 30  # Default frame rate limit to 30 FPS
+    
+    return args
     
 def main():
     """主函数"""
