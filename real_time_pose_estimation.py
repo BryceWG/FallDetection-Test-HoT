@@ -171,15 +171,15 @@ class PoseEstimator:
     def setup_camera(self):
         """设置视频输入源（摄像头或视频文件）"""
         if self.is_video_input:
-            print(f"正在打开视频文件: {self.args.video_path}")
+            print(f"Opening video file: {self.args.video_path}")
             self.cap = cv2.VideoCapture(self.args.video_path)
         else:
-            print(f"正在初始化摄像头 (ID: {self.args.camera_id})...")
+            print(f"Initializing camera (ID: {self.args.camera_id})...")
             self.cap = cv2.VideoCapture(self.args.camera_id)
         
         # 检查是否成功打开
         if not self.cap.isOpened():
-            error_msg = "无法打开视频文件" if self.is_video_input else "无法打开摄像头"
+            error_msg = "Cannot open video file" if self.is_video_input else "Cannot open camera"
             print(error_msg)
             sys.exit(1)
             
@@ -191,22 +191,22 @@ class PoseEstimator:
         if self.is_video_input:
             self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = self.frame_count / self.source_fps
-            print(f"视频信息:")
-            print(f"- 分辨率: {self.frame_width}x{self.frame_height}")
-            print(f"- 原始帧率: {self.source_fps:.2f} FPS")
-            print(f"- 总帧数: {self.frame_count}")
-            print(f"- 时长: {duration:.2f} 秒")
+            print(f"Video Information:")
+            print(f"- Resolution: {self.frame_width}x{self.frame_height}")
+            print(f"- Original FPS: {self.source_fps:.2f} FPS")
+            print(f"- Total Frames: {self.frame_count}")
+            print(f"- Duration: {duration:.2f} seconds")
             
             # 如果没有强制指定帧率，使用视频原始帧率
             if not self.args.force_fps:
                 self.fps_limit = self.source_fps
-                print(f"使用视频原始帧率: {self.fps_limit} FPS")
+                print(f"Using video's original FPS: {self.fps_limit} FPS")
         else:
-            print(f"摄像头已初始化:")
-            print(f"- 分辨率: {self.frame_width}x{self.frame_height}")
+            print(f"Camera initialized:")
+            print(f"- Resolution: {self.frame_width}x{self.frame_height}")
             if self.source_fps > 0:
-                print(f"- 支持的帧率: {self.source_fps} FPS")
-            print(f"- 实际输出帧率: {self.fps_limit} FPS")
+                print(f"- Supported FPS: {self.source_fps} FPS")
+            print(f"- Output FPS: {self.fps_limit} FPS")
         
     def release_resources(self):
         """释放资源"""
@@ -546,7 +546,7 @@ class PoseEstimator:
         if not self.save_results or len(self.all_keypoints) == 0:
             return
             
-        print("\n保存结果到文件...")
+        print("\nSaving results to file...")
         
         try:
             # 过滤出有效的关键点数据
@@ -563,10 +563,10 @@ class PoseEstimator:
                         valid_poses_3d.append(self.all_poses_3d[i])
             
             if len(valid_keypoints) == 0:
-                print("没有有效的关键点数据可以保存")
+                print("No valid keypoint data to save")
                 return
                 
-            print(f"处理了 {len(self.all_keypoints)} 帧，其中有效帧数: {len(valid_keypoints)}")
+            print(f"Processed {len(self.all_keypoints)} frames, valid frames: {len(valid_keypoints)}")
             
             # 转换2D关键点到HRNet格式
             keypoints_array = np.array(valid_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
@@ -579,19 +579,19 @@ class PoseEstimator:
             # 保存2D关键点
             output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
             np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
-            print(f"2D关键点数据已保存到: {output_2d_path}")
+            print(f"2D keypoint data saved to: {output_2d_path}")
             
             # 保存3D姿态
             if len(valid_poses_3d) > 0:
                 output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
                 poses_3d_array = np.array(valid_poses_3d)
                 np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
-                print(f"3D姿态数据已保存到: {output_3d_path}")
+                print(f"3D pose data saved to: {output_3d_path}")
                 
-            print(f"所有结果已保存到目录: {self.output_dir}")
+            print(f"All results saved to directory: {self.output_dir}")
             
         except Exception as e:
-            print(f"保存结果时发生错误: {e}")
+            print(f"Error occurred while saving results: {e}")
             import traceback
             traceback.print_exc()
 
@@ -664,6 +664,9 @@ class PoseEstimator:
         next_sequence = None    # 下一个待播放的序列
         current_frame_idx = 0   # 当前播放帧索引
         
+        # 用于存储所有3D序列的列表
+        all_3d_sequences = []  # 存储所有243帧序列
+        
         # 性能监控变量
         prediction_times = []  # 记录预测时间
         last_sequence_end_time = time.time()  # 上一个序列结束时间
@@ -728,7 +731,7 @@ class PoseEstimator:
                                     continue
                                 elif len(buffer_keypoints) >= 243:
                                     # 如果已经收集了完整序列，停止继续处理
-                                    print("\n\n=== 序列完成后未检测到人体，等待新的人体出现 ===")
+                                    print("\n\n=== 序列完成，未检测到人体，等待新的人体出现 ===")
                                     buffer_keypoints = []
                                     sequence_started = False
                                     is_warmup = True
@@ -751,6 +754,9 @@ class PoseEstimator:
                         # 预测3D姿态序列
                         new_sequence = self.predict_3d_pose(input_keypoints)
                         
+                        # 保存完整的243帧序列
+                        all_3d_sequences.append(new_sequence)
+                        
                         # 更新序列管理
                         if current_sequence is None:
                             current_sequence = new_sequence
@@ -762,13 +768,10 @@ class PoseEstimator:
                         prediction_time = time.time() - sequence_start_time
                         prediction_times.append(prediction_time)
                         
-                        # 更新序列计数
-                        sequence_counter += 1
-                        
                         # 如果是预热阶段
                         if is_warmup:
                             print("\n\n=== 预热完成 ===")
-                            print(f"首次预测时间: {prediction_time:.2f}秒")
+                            print(f"首次预测时间: {prediction_time:.2f} 秒")
                             print("开始正常预测流程...\n")
                             is_warmup = False
                         else:
@@ -783,6 +786,7 @@ class PoseEstimator:
                         # 清空缓冲区，准备下一个序列
                         buffer_keypoints = buffer_keypoints[243:]
                         last_sequence_end_time = time.time()
+                        sequence_counter += 1
                 
                 # 处理3D可视化更新
                 if current_sequence is not None and self.visualization_mode:
@@ -795,16 +799,16 @@ class PoseEstimator:
                         # 只有当渲染成功时才更新显示
                         if vis_3d is not None:
                             # 添加序列播放信息
-                            cv2.putText(vis_3d, f"序列 #{sequence_counter}", (10, 90), 
+                            cv2.putText(vis_3d, f"Sequence #{sequence_counter}", (10, 90), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            cv2.putText(vis_3d, f"帧 {current_frame_idx + 1}/243", (10, 120), 
+                            cv2.putText(vis_3d, f"Frame {current_frame_idx + 1}/243", (10, 120), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             if self.is_video_input:
                                 # 添加视频播放信息
                                 current_time = self.frame_counter / self.source_fps
                                 total_time = self.frame_count / self.source_fps
-                                time_info = f"时间: {current_time:.1f}/{total_time:.1f}秒"
+                                time_info = f"Time: {current_time:.1f}/{total_time:.1f}s"
                                 cv2.putText(vis_3d, time_info, (10, 150), 
                                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
@@ -831,26 +835,28 @@ class PoseEstimator:
                     # 显示等待状态
                     blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
                     if not sequence_started:
-                        status_text = "等待检测到人体..."
+                        status_text = "Waiting for person detection..."
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     elif is_warmup:
-                        status_text = f"系统预热中... ({len(buffer_keypoints)}/243 帧)"
+                        status_text = f"System warming up... ({len(buffer_keypoints)}/243 frames)"
                         frames_remaining = 243 - len(buffer_keypoints)
-                        time_remaining = f"预计剩余时间: {frames_remaining/30:.1f}秒"
+                        time_remaining = f"Estimated time remaining: {frames_remaining/30:.1f}s"
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(blank_3d, time_remaining, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     else:
                         if len(buffer_keypoints) > 0:
-                            status_text = f"处理下一个序列中... ({len(buffer_keypoints)}/243 帧)"
+                            status_text = f"Processing next sequence... ({len(buffer_keypoints)}/243 frames)"
                             frames_remaining = 243 - len(buffer_keypoints)
-                            time_remaining = f"预计剩余时间: {frames_remaining/30:.1f}秒"
-                            cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            cv2.putText(blank_3d, time_remaining, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            time_remaining = f"Estimated time remaining: {frames_remaining/30:.1f}s"
+                            cv2.putText(blank_3d, status_text, (10, 30), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.putText(blank_3d, time_remaining, (10, 60), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         else:
-                            cv2.putText(blank_3d, "等待下一个序列...", (10, 30), 
+                            cv2.putText(blank_3d, "Waiting for next sequence...", (10, 30), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
-                        cv2.putText(blank_3d, f"已完成序列数: {sequence_counter}", (10, 90), 
+                        cv2.putText(blank_3d, f"Completed sequences: {sequence_counter}", (10, 90), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     
                     # 放入队列
@@ -874,18 +880,34 @@ class PoseEstimator:
             # 如果剩余帧数不足243，通过复制最后一帧来填充
             if len(buffer_keypoints) < 243:
                 pad_length = 243 - len(buffer_keypoints)
-                print(f"填充{pad_length}帧以完成最后一个序列")
+                print(f"填充 {pad_length} 帧以完成最后一个序列")
                 buffer_keypoints.extend([buffer_keypoints[-1]] * pad_length)
             
             # 处理最后一个序列
             input_keypoints = np.array(buffer_keypoints[:243])
-            pose_3d_sequence = self.predict_3d_pose(input_keypoints)
+            final_sequence = self.predict_3d_pose(input_keypoints)
             
-            # 保存最后的结果
-            if self.save_results:
-                self.all_poses_3d.append(pose_3d_sequence[-1])
-                
+            # 保存最后的序列
+            all_3d_sequences.append(final_sequence)
+            sequence_counter += 1
+            
             print("所有帧处理完成")
+            
+        # 保存完整的3D序列数据
+        if len(all_3d_sequences) > 0:
+            # 将所有序列连接成一个大的数组
+            all_sequences_array = np.concatenate(all_3d_sequences, axis=0)
+            
+            # 保存完整序列
+            if self.save_results:
+                output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+                np.savez_compressed(output_3d_path, 
+                                  reconstruction=all_sequences_array,
+                                  sequence_length=243,
+                                  total_sequences=len(all_3d_sequences))
+                print(f"\n保存了 {len(all_3d_sequences)} 个序列，"
+                      f"总帧数: {len(all_3d_sequences) * 243}")
+                print(f"3D姿态数据已保存到: {output_3d_path}")
 
     def run(self):
         """运行姿态估计pipeline"""
@@ -901,12 +923,12 @@ class PoseEstimator:
             thread.start()
             
         try:
-            print("\n开始实时姿态估计...")
-            print("按 'q' 退出，按 'p' 暂停/继续")
-            print("\n处理线程:")
-            print("- 主循环: 帧捕获和显示")
-            print("- 2D线程: YOLO模型用于人体检测和关键点提取")
-            print("- 3D线程: MixSTE模型用于3D姿态重建\n")
+            print("\nStarting real-time pose estimation...")
+            print("Press 'q' to quit, 'p' to pause/resume")
+            print("\nProcessing threads:")
+            print("- Main loop: Frame capture and display")
+            print("- 2D thread: YOLO model for human detection and keypoint extraction")
+            print("- 3D thread: MixSTE model for 3D pose reconstruction\n")
 
             # 视频播放控制
             paused = False
@@ -915,7 +937,7 @@ class PoseEstimator:
 
             # 进度条（仅用于视频文件）
             if self.is_video_input:
-                pbar = tqdm(total=self.frame_count, desc="视频进度", unit="帧")
+                pbar = tqdm(total=self.frame_count, desc="Video Progress", unit="frames")
 
             # 主循环
             while True:
@@ -924,14 +946,14 @@ class PoseEstimator:
                 # 处理键盘输入
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
-                    print("\n用户请求退出")
+                    print("\nUser requested exit")
                     break
                 elif key == ord('p'):
                     paused = not paused
                     if paused:
-                        print("\n播放已暂停")
+                        print("\nPlayback paused")
                     else:
-                        print("\n继续播放")
+                        print("\nResuming playback")
                         next_frame_time = current_time  # 重置帧时间
                 
                 if paused:
@@ -946,9 +968,9 @@ class PoseEstimator:
                 ret, frame = self.cap.read()
                 if not ret:
                     if self.is_video_input:
-                        print("\n视频播放完成")
+                        print("\nVideo playback completed")
                     else:
-                        print("\n无法从摄像头读取帧")
+                        print("\nCannot read frame from camera")
                     break
                 
                 self.last_frame_time = current_time
@@ -981,7 +1003,7 @@ class PoseEstimator:
                     elif self.frame_counter % 30 == 0:  # 每30帧检查一次状态
                         # 创建状态显示
                         blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                        status_text = "状态: 等待下一个243帧序列..."
+                        status_text = "Status: Waiting for next 243-frame sequence..."
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.imshow("3D Pose Reconstruction", blank_3d)
                 
@@ -993,17 +1015,17 @@ class PoseEstimator:
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
                     if self.is_video_input:
                         progress = (self.frame_counter / self.frame_count) * 100
-                        print(f"\r显示帧率: {actual_fps:.1f} FPS | "
-                              f"YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
-                              f"3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS | "
-                              f"进度: {progress:.1f}%", end="")
+                        print(f"\rDisplay FPS: {actual_fps:.1f} | "
+                              f"YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
+                              f"3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS | "
+                              f"Progress: {progress:.1f}%", end="")
                     else:
-                        print(f"\r显示帧率: {actual_fps:.1f} FPS | "
-                              f"YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
-                              f"3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                        print(f"\rDisplay FPS: {actual_fps:.1f} | "
+                              f"YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
+                              f"3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
                     
         except KeyboardInterrupt:
-            print("\n用户中断程序")
+            print("\nProgram interrupted by user")
         finally:
             # 停止所有线程
             stop_event.set()
