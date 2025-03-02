@@ -46,6 +46,13 @@ class PoseEstimator:
         self.fps_limit = args.video_fps_limit
         self.use_opencv_render = args.use_opencv_render  # 使用OpenCV渲染标志
         
+        # 视频相关参数
+        self.input_type = 'camera' if args.video_path is None else 'video'
+        self.video_path = args.video_path
+        self.video_loop = args.video_loop
+        self.pause_video = False
+        self.original_video_fps = 0  # 原始视频帧率，后续会读取
+        
         # 固定窗口批量处理相关变量
         self.use_fixed_window = args.use_fixed_window
         self.window_size = 243  # 固定窗口大小，由模型架构决定
@@ -71,6 +78,10 @@ class PoseEstimator:
         print(f"设备: {self.device}")
         if self.device.type == 'cuda':
             print(f"CUDA设备: {torch.cuda.get_device_name(0)}")
+        print(f"输入类型: {'本地视频' if self.input_type == 'video' else '摄像头'}")
+        if self.input_type == 'video':
+            print(f"视频路径: {self.video_path}")
+            print(f"循环播放: {'启用' if self.video_loop else '禁用'}")
         print(f"可视化模式: {'启用' if self.visualization_mode else '禁用'}")
         print(f"3D渲染方式: {'OpenCV (快速)' if self.use_opencv_render else 'Matplotlib (详细)'}")
         print(f"窗口处理模式: {'固定窗口批量处理' if self.use_fixed_window else '滑动窗口连续处理'}")
@@ -187,20 +198,53 @@ class PoseEstimator:
         return args
             
     def setup_camera(self):
-        """设置摄像头"""
-        print(f"正在初始化摄像头 (ID: {self.args.camera_id})...")
-        self.cap = cv2.VideoCapture(self.args.camera_id)
-        
-        # 检查摄像头是否正常打开
-        if not self.cap.isOpened():
-            print("无法打开摄像头")
-            sys.exit(1)
+        """设置摄像头或视频输入"""
+        if self.input_type == 'camera':
+            print(f"正在初始化摄像头 (ID: {self.args.camera_id})...")
+            self.cap = cv2.VideoCapture(self.args.camera_id)
             
-        # 获取摄像头信息，不再手动设置分辨率
-        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        print(f"摄像头初始化成功，分辨率: {self.frame_width}x{self.frame_height}")
+            # 检查摄像头是否正常打开
+            if not self.cap.isOpened():
+                print("无法打开摄像头")
+                sys.exit(1)
+                
+            # 获取摄像头信息
+            self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.original_video_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.frame_count = -1  # 摄像头没有固定帧数
+            
+            print(f"摄像头初始化成功，分辨率: {self.frame_width}x{self.frame_height}, FPS: {self.original_video_fps}")
+            
+        else:  # 视频文件输入
+            print(f"正在加载视频文件: {self.video_path}")
+            self.cap = cv2.VideoCapture(self.video_path)
+            
+            # 检查视频是否正常打开
+            if not self.cap.isOpened():
+                print(f"无法打开视频文件: {self.video_path}")
+                sys.exit(1)
+                
+            # 获取视频信息
+            self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.original_video_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.video_duration = self.frame_count / self.original_video_fps
+            
+            # 设置视频开始时间
+            if self.args.video_start_time > 0:
+                start_frame = int(self.args.video_start_time * self.original_video_fps)
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                print(f"视频将从 {self.args.video_start_time:.2f} 秒处开始播放")
+                
+            print(f"视频加载成功，总帧数: {self.frame_count}, 时长: {self.video_duration:.2f}秒")
+            print(f"分辨率: {self.frame_width}x{self.frame_height}, FPS: {self.original_video_fps}")
+            
+        # 如果未指定帧率限制，使用原始视频帧率
+        if self.fps_limit == 0:
+            self.fps_limit = self.original_video_fps
+            print(f"未指定帧率限制，将使用原始视频帧率: {self.fps_limit} FPS")
         
     def release_resources(self):
         """释放资源"""
@@ -522,6 +566,39 @@ class PoseEstimator:
             
         print("正在保存结果到文件...")
         
+        # 创建输出目录结构
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'input_2D'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'output_3D'), exist_ok=True)
+        if self.visualization_mode:
+            os.makedirs(os.path.join(self.output_dir, 'pose2D'), exist_ok=True)
+            os.makedirs(os.path.join(self.output_dir, 'pose3D'), exist_ok=True)
+            
+        # 为视频输入创建特定的文件名
+        if self.input_type == 'video':
+            # 从视频路径中提取文件名作为标识符
+            video_name = os.path.splitext(os.path.basename(self.video_path))[0]
+            output_prefix = f"{video_name}_"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            info_file_path = os.path.join(self.output_dir, f"{video_name}_{timestamp}_info.txt")
+            
+            # 保存视频信息到文本文件
+            with open(info_file_path, 'w') as f:
+                f.write(f"视频文件: {self.video_path}\n")
+                f.write(f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"总帧数: {self.frame_count}\n")
+                f.write(f"视频时长: {self.video_duration:.2f}秒\n")
+                f.write(f"视频帧率: {self.original_video_fps}fps\n")
+                f.write(f"分辨率: {self.frame_width}x{self.frame_height}\n")
+                f.write(f"处理模式: {'固定窗口批量处理' if self.use_fixed_window else '滑动窗口连续处理'}\n")
+                if self.use_fixed_window:
+                    f.write(f"窗口大小: {self.window_size}帧\n")
+                    f.write(f"处理窗口数: {self.window_count}\n")
+                f.write(f"处理帧数: {len(self.all_keypoints)}\n")
+        else:
+            # 摄像头模式使用时间戳作为标识符
+            output_prefix = "camera_"
+            
         # 判断使用哪种方式保存结果
         if self.use_fixed_window:
             # 固定窗口批处理模式
@@ -552,12 +629,12 @@ class PoseEstimator:
             scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
             
             # 保存2D关键点
-            output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
+            output_2d_path = os.path.join(self.output_dir, 'input_2D', f'{output_prefix}input_keypoints_2d.npz')
             np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
             
             # 保存3D姿态
             if len(all_poses_3d) > 0:
-                output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+                output_3d_path = os.path.join(self.output_dir, 'output_3D', f'{output_prefix}output_keypoints_3d.npz')
                 poses_3d_array = np.array(all_poses_3d)
                 np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
                 
@@ -578,16 +655,20 @@ class PoseEstimator:
             scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
             
             # 保存2D关键点
-            output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
+            output_2d_path = os.path.join(self.output_dir, 'input_2D', f'{output_prefix}input_keypoints_2d.npz')
             np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
             
             # 保存3D姿态
             if len(self.all_poses_3d) > 0:
-                output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+                output_3d_path = os.path.join(self.output_dir, 'output_3D', f'{output_prefix}output_keypoints_3d.npz')
                 poses_3d_array = np.array(self.all_poses_3d)
                 np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
                 
             print(f"已保存 {len(self.all_keypoints)} 帧的结果到 {self.output_dir}")
+            
+        # 为视频创建附加信息
+        if self.input_type == 'video':
+            print(f"视频处理信息已保存到 {info_file_path}")
 
     def extract_2d_pose_thread(self):
         """2D姿态提取线程"""
@@ -995,7 +1076,7 @@ class PoseEstimator:
             
         try:
             print("开始实时姿态估计...")
-            print("按 'q' 键退出")
+            print("按 'q' 键退出，按 'p' 键暂停/继续，按 'r' 键重置视频到开始位置")
             
             if self.use_fixed_window:
                 print("\n固定窗口批量处理配置:")
@@ -1010,6 +1091,11 @@ class PoseEstimator:
                 print("- 3D预测线程：运行MixSTE模型进行3D姿态重建\n")
 
             # 主循环
+            current_frame = 0  # 当前处理的帧数
+            last_frame_time = time.time()  # 上一帧的处理时间
+            frame_timer = 0  # 帧计时器，用于控制播放速度
+            end_of_video = False  # 视频是否播放完毕标志
+            
             while True:
                 start_time = time.time()
                 
@@ -1018,25 +1104,125 @@ class PoseEstimator:
                     time_since_last_frame = time.time() - self.last_frame_time
                     target_time_between_frames = 1.0 / self.fps_limit
                     
+                    # 计算需要等待的时间以维持目标帧率
                     if time_since_last_frame < target_time_between_frames:
-                        # 等待以确保不超过目标帧率
                         time.sleep(target_time_between_frames - time_since_last_frame)
+                
+                # 处理用户输入
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("\n用户请求退出")
+                    break
+                elif key == ord('p'):
+                    # 暂停/继续视频播放
+                    self.pause_video = not self.pause_video
+                    pause_status = "暂停" if self.pause_video else "继续"
+                    print(f"\n视频播放已{pause_status}")
+                    continue
+                elif key == ord('r') and self.input_type == 'video':
+                    # 重置视频到开始位置
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    current_frame = 0
+                    end_of_video = False
+                    print("\n视频已重置到开始位置")
+                    continue
+                
+                # 如果暂停，跳过帧处理
+                if self.pause_video:
+                    # 显示上次处理的结果
+                    if self.visualization_mode:
+                        # 添加暂停提示
+                        if not visualization_2d_queue.empty():
+                            vis_2d = visualization_2d_queue.get()
+                            cv2.putText(vis_2d, "已暂停", (self.frame_width - 150, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.imshow("2D Pose Detection", vis_2d)
+                            visualization_2d_queue.put(vis_2d)  # 放回队列
+                            
+                        if not visualization_3d_queue.empty():
+                            vis_3d = visualization_3d_queue.get()
+                            cv2.putText(vis_3d, "已暂停", (self.render_size[0] - 150, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.imshow("3D Pose Reconstruction", vis_3d)
+                            visualization_3d_queue.put(vis_3d)  # 放回队列
+                    
+                    time.sleep(0.05)  # 减少CPU使用率
+                    continue
+                
+                # 检查视频播放状态
+                if self.input_type == 'video' and end_of_video:
+                    if self.video_loop:
+                        # 循环播放，重置视频
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        current_frame = 0
+                        end_of_video = False
+                        print("\n视频已重新开始播放")
+                    else:
+                        # 非循环模式，显示最后一帧并等待
+                        time.sleep(0.1)
+                        continue
                 
                 # 读取帧
                 ret, frame = self.cap.read()
                 if not ret:
-                    print("无法从摄像头读取帧")
-                    break
+                    if self.input_type == 'camera':
+                        print("无法从摄像头读取帧")
+                        break
+                    else:
+                        # 视频播放完毕
+                        end_of_video = True
+                        if self.video_loop:
+                            continue  # 返回循环开始处重置视频
+                        else:
+                            print("\n视频播放完毕")
+                            if self.visualization_mode:
+                                # 显示播放完毕提示
+                                if not visualization_2d_queue.empty():
+                                    vis_2d = visualization_2d_queue.get()
+                                    cv2.putText(vis_2d, "视频播放完毕", (self.frame_width - 250, 30), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                    cv2.imshow("2D Pose Detection", vis_2d)
+                                
+                            # 等待用户按键
+                            key = cv2.waitKey(1000) & 0xFF
+                            if key == ord('q'):
+                                break
+                            elif key == ord('r'):
+                                # 重置视频
+                                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                                current_frame = 0
+                                end_of_video = False
+                                continue
+                            else:
+                                # 继续等待
+                                time.sleep(0.1)
+                                continue
                 
+                # 更新帧计数和时间
+                current_frame += 1
                 self.last_frame_time = time.time()
                 self.frame_counter += 1
+                
+                # 添加视频播放信息到帧
+                if self.input_type == 'video':
+                    # 计算当前视频时间和进度
+                    current_time = current_frame / self.original_video_fps
+                    progress = current_frame / self.frame_count * 100
+                    
+                    # 在帧上显示播放信息
+                    time_text = f"时间: {current_time:.2f}s / {self.video_duration:.2f}s"
+                    progress_text = f"进度: {progress:.1f}%"
+                    cv2.putText(frame, time_text, (10, self.frame_height - 60), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(frame, progress_text, (10, self.frame_height - 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     
                 # 添加到帧队列
                 if not frame_queue.full():
                     frame_queue.put(frame)
                     
                 # 显示原始摄像头画面（不包含姿态标识）
-                cv2.imshow("Camera Feed", frame)
+                cv2.imshow("Input Feed", frame)
                 
                 # 显示2D可视化结果
                 if self.visualization_mode and not visualization_2d_queue.empty():
@@ -1055,46 +1241,54 @@ class PoseEstimator:
                 fps = 1.0 / max(0.001, self.frame_time)  # 避免除以零
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
                     if self.use_fixed_window:
-                        print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
-                              f"Window: {self.window_count} | Frames: {self.total_frames_processed}", end="")
+                        if self.input_type == 'video':
+                            print(f"\r视频进度: {progress:.1f}% | Display Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
+                                  f"Window: {self.window_count} | Frames: {self.total_frames_processed}", end="")
+                        else:
+                            print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
+                                  f"Window: {self.window_count} | Frames: {self.total_frames_processed}", end="")
                     else:
-                        print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
-                              f"3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                        if self.input_type == 'video':
+                            print(f"\r视频进度: {progress:.1f}% | Display Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
+                                  f"3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                        else:
+                            print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
+                                  f"3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                    
+                # 如果是视频且需要保持原始帧率，可能需要额外的等待
+                if self.input_type == 'video' and self.fps_limit == self.original_video_fps:
+                    elapsed = time.time() - start_time
+                    frame_time = 1.0 / self.original_video_fps
+                    if elapsed < frame_time:
+                        time.sleep(frame_time - elapsed)
                 
-                # 设置更短的等待时间，提高响应速度
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("\n用户请求退出")
+            # 处理剩余帧和关闭前的操作
+            if self.use_fixed_window and len(self.current_window_keypoints) > 0:
+                print(f"\n等待处理剩余的 {len(self.current_window_keypoints)} 帧...")
+                self.is_shutting_down = True
+                
+                # 如果有部分收集的帧但不足一个窗口，填充剩余帧
+                if 0 < len(self.current_window_keypoints) < self.window_size:
+                    frames_needed = self.window_size - len(self.current_window_keypoints)
+                    print(f"填充 {frames_needed} 帧以完成最后一个窗口")
                     
-                    # 在固定窗口模式下，需要处理剩余的帧
-                    if self.use_fixed_window and len(self.current_window_keypoints) > 0:
-                        print(f"\n等待处理剩余的 {len(self.current_window_keypoints)} 帧...")
-                        self.is_shutting_down = True
-                        
-                        # 如果有部分收集的帧但不足一个窗口，填充剩余帧
-                        if 0 < len(self.current_window_keypoints) < self.window_size:
-                            frames_needed = self.window_size - len(self.current_window_keypoints)
-                            print(f"填充 {frames_needed} 帧以完成最后一个窗口")
-                            
-                            # 使用最后一帧的复制来填充
-                            last_frame = self.current_window_frames[-1]
-                            last_keypoints = self.current_window_keypoints[-1]
-                            last_scores = self.current_window_scores[-1]
-                            
-                            for _ in range(frames_needed):
-                                self.current_window_frames.append(last_frame.copy())
-                                self.current_window_keypoints.append(last_keypoints.copy())
-                                self.current_window_scores.append(last_scores.copy())
-                        
-                        # 等待最后一个窗口处理完成
-                        wait_start = time.time()
-                        while self.is_shutting_down and time.time() - wait_start < 30:  # 最多等待30秒
-                            if len(self.current_window_keypoints) == 0:
-                                print("所有窗口处理完成，正在关闭程序...")
-                                break
-                            time.sleep(0.1)
+                    # 使用最后一帧的复制来填充
+                    last_frame = self.current_window_frames[-1]
+                    last_keypoints = self.current_window_keypoints[-1]
+                    last_scores = self.current_window_scores[-1]
                     
-                    break
+                    for _ in range(frames_needed):
+                        self.current_window_frames.append(last_frame.copy())
+                        self.current_window_keypoints.append(last_keypoints.copy())
+                        self.current_window_scores.append(last_scores.copy())
+                
+                # 等待最后一个窗口处理完成
+                wait_start = time.time()
+                while self.is_shutting_down and time.time() - wait_start < 30:  # 最多等待30秒
+                    if len(self.current_window_keypoints) == 0:
+                        print("所有窗口处理完成，正在关闭程序...")
+                        break
+                    time.sleep(0.1)
                     
         except KeyboardInterrupt:
             print("\n用户中断程序")
@@ -1117,8 +1311,16 @@ def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='实时姿态估计')
     
+    # 输入源参数
+    input_group = parser.add_mutually_exclusive_group(required=False)
+    input_group.add_argument('--camera_id', type=int, default=0, help='摄像头ID')
+    input_group.add_argument('--video_path', type=str, default=None, help='输入视频文件路径')
+    
+    # 视频播放控制
+    parser.add_argument('--video_loop', action='store_true', help='循环播放视频')
+    parser.add_argument('--video_start_time', type=float, default=0, help='视频开始时间(秒)')
+    
     # 基本参数
-    parser.add_argument('--camera_id', type=int, default=0, help='摄像头ID')
     parser.add_argument('--output_dir', type=str, default='./output', help='输出目录')
     
     # 模型参数

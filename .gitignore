@@ -9,3 +9,10 @@
 *.weights
 *.mp4
 *.code-workspace
+*.txt
+*.json
+*.yaml
+*.yml
+*.jsonl
+*.jsonl.gz
+*.jsonl.tar.gz
