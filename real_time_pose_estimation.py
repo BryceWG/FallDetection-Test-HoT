@@ -45,12 +45,18 @@ class PoseEstimator:
         self.frame_counter = 0
         self.fps_limit = args.video_fps_limit
         self.use_opencv_render = args.use_opencv_render  # 使用OpenCV渲染标志
+        self.is_video_input = args.video_path is not None
         
         # 打印重要的配置信息
         print(f"\n=== System Configuration ===")
         print(f"Device: {self.device}")
         if self.device.type == 'cuda':
             print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
+        print(f"Input Source: {'Video File' if self.is_video_input else 'Camera'}")
+        if self.is_video_input:
+            print(f"Video Path: {args.video_path}")
+        else:
+            print(f"Camera ID: {args.camera_id}")
         print(f"Visualization Mode: {'Enabled' if self.visualization_mode else 'Disabled'}")
         print(f"3D Rendering Method: {'OpenCV (Fast)' if self.use_opencv_render else 'Matplotlib (Detailed)'}")
         print(f"Processing Scheme: Fixed 243-frame sequence")
@@ -59,7 +65,7 @@ class PoseEstimator:
         if self.save_results:
             print(f"Output Directory: {self.output_dir}")
         if self.fps_limit > 0:
-            print(f"Video Frame Rate Limit: {self.fps_limit} FPS")
+            print(f"Frame Rate Limit: {self.fps_limit} FPS")
         print(f"==============\n")
         
         # 创建输出目录
@@ -75,11 +81,12 @@ class PoseEstimator:
         self._init_yolo_model()
         self._init_mixste_model()
         
-        # 摄像头设置
+        # 视频/摄像头设置
         self.cap = None
         self.frame_width = 0
         self.frame_height = 0
         self.frame_count = 0
+        self.source_fps = 0
         
         # 用于存储结果的数组
         self.all_keypoints = []
@@ -162,20 +169,44 @@ class PoseEstimator:
         return args
             
     def setup_camera(self):
-        """设置摄像头"""
-        print(f"Initializing camera (ID: {self.args.camera_id})...")
-        self.cap = cv2.VideoCapture(self.args.camera_id)
+        """设置视频输入源（摄像头或视频文件）"""
+        if self.is_video_input:
+            print(f"正在打开视频文件: {self.args.video_path}")
+            self.cap = cv2.VideoCapture(self.args.video_path)
+        else:
+            print(f"正在初始化摄像头 (ID: {self.args.camera_id})...")
+            self.cap = cv2.VideoCapture(self.args.camera_id)
         
-        # 检查摄像头是否正常打开
+        # 检查是否成功打开
         if not self.cap.isOpened():
-            print("Failed to open camera")
+            error_msg = "无法打开视频文件" if self.is_video_input else "无法打开摄像头"
+            print(error_msg)
             sys.exit(1)
             
-        # 获取摄像头信息，不再手动设置分辨率
+        # 获取视频信息
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.source_fps = self.cap.get(cv2.CAP_PROP_FPS)
         
-        print(f"Camera initialized successfully, resolution: {self.frame_width}x{self.frame_height}")
+        if self.is_video_input:
+            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = self.frame_count / self.source_fps
+            print(f"视频信息:")
+            print(f"- 分辨率: {self.frame_width}x{self.frame_height}")
+            print(f"- 原始帧率: {self.source_fps:.2f} FPS")
+            print(f"- 总帧数: {self.frame_count}")
+            print(f"- 时长: {duration:.2f} 秒")
+            
+            # 如果没有强制指定帧率，使用视频原始帧率
+            if not self.args.force_fps:
+                self.fps_limit = self.source_fps
+                print(f"使用视频原始帧率: {self.fps_limit} FPS")
+        else:
+            print(f"摄像头已初始化:")
+            print(f"- 分辨率: {self.frame_width}x{self.frame_height}")
+            if self.source_fps > 0:
+                print(f"- 支持的帧率: {self.source_fps} FPS")
+            print(f"- 实际输出帧率: {self.fps_limit} FPS")
         
     def release_resources(self):
         """释放资源"""
@@ -755,6 +786,7 @@ class PoseEstimator:
                 # 处理3D可视化更新
                 if current_sequence is not None and self.visualization_mode:
                     # 控制帧率
+                    target_frame_time = 1.0 / self.fps_limit if self.fps_limit > 0 else 1.0 / 30.0
                     if current_time - last_frame_update >= target_frame_time:
                         # 创建3D可视化
                         vis_3d = self.create_3d_visualization(current_sequence[current_frame_idx])
@@ -766,6 +798,14 @@ class PoseEstimator:
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             cv2.putText(vis_3d, f"帧 {current_frame_idx + 1}/243", (10, 120), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            
+                            if self.is_video_input:
+                                # 添加视频播放信息
+                                current_time = self.frame_counter / self.source_fps
+                                total_time = self.frame_count / self.source_fps
+                                time_info = f"时间: {current_time:.1f}/{total_time:.1f}秒"
+                                cv2.putText(vis_3d, time_info, (10, 150), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             # 清空可视化队列并放入新帧
                             with visualization_3d_queue.mutex:
@@ -860,41 +900,72 @@ class PoseEstimator:
             thread.start()
             
         try:
-            print("Starting real-time pose estimation...")
-            print("Press 'q' to exit")
-            print("\nSeparate Processing Threads:")
-            print("- Main Loop: Frame capture and display")
-            print("- 2D Thread: YOLO model for human detection and keypoint extraction")
-            print("- 3D Thread: MixSTE model for 3D pose reconstruction\n")
+            print("\n开始实时姿态估计...")
+            print("按 'q' 退出，按 'p' 暂停/继续")
+            print("\n处理线程:")
+            print("- 主循环: 帧捕获和显示")
+            print("- 2D线程: YOLO模型用于人体检测和关键点提取")
+            print("- 3D线程: MixSTE模型用于3D姿态重建\n")
+
+            # 视频播放控制
+            paused = False
+            frame_time = 1.0 / self.fps_limit if self.fps_limit > 0 else 1.0 / 30.0
+            next_frame_time = time.time()
+
+            # 进度条（仅用于视频文件）
+            if self.is_video_input:
+                pbar = tqdm(total=self.frame_count, desc="视频进度", unit="帧")
 
             # 主循环
             while True:
-                start_time = time.time()
+                current_time = time.time()
+                
+                # 处理键盘输入
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("\n用户请求退出")
+                    break
+                elif key == ord('p'):
+                    paused = not paused
+                    if paused:
+                        print("\n播放已暂停")
+                    else:
+                        print("\n继续播放")
+                        next_frame_time = current_time  # 重置帧时间
+                
+                if paused:
+                    time.sleep(0.1)  # 暂停时减少CPU使用
+                    continue
                 
                 # 帧率控制
-                if self.fps_limit > 0:
-                    time_since_last_frame = time.time() - self.last_frame_time
-                    target_time_between_frames = 1.0 / self.fps_limit
-                    
-                    if time_since_last_frame < target_time_between_frames:
-                        # 等待以确保不超过目标帧率
-                        time.sleep(target_time_between_frames - time_since_last_frame)
+                if current_time < next_frame_time:
+                    continue
                 
                 # 读取帧
                 ret, frame = self.cap.read()
                 if not ret:
-                    print("Failed to read frame from camera")
+                    if self.is_video_input:
+                        print("\n视频播放完成")
+                    else:
+                        print("\n无法从摄像头读取帧")
                     break
                 
-                self.last_frame_time = time.time()
+                self.last_frame_time = current_time
                 self.frame_counter += 1
+                
+                # 更新进度条
+                if self.is_video_input:
+                    pbar.update(1)
                     
                 # 添加到帧队列
                 if not frame_queue.full():
                     frame_queue.put(frame)
                     
-                # 显示原始摄像头画面（不包含姿态标识）
-                cv2.imshow("Camera Feed", frame)
+                # 计算下一帧的目标时间
+                next_frame_time = current_time + frame_time
+                
+                # 显示原始画面
+                cv2.imshow("Input Feed", frame)
                 
                 # 显示2D可视化结果
                 if self.visualization_mode and not visualization_2d_queue.empty():
@@ -909,29 +980,36 @@ class PoseEstimator:
                     elif self.frame_counter % 30 == 0:  # 每30帧检查一次状态
                         # 创建状态显示
                         blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                        status_text = "Status: Waiting for next 243-frame sequence..."
+                        status_text = "状态: 等待下一个243帧序列..."
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.imshow("3D Pose Reconstruction", blank_3d)
                 
-                # 计算帧率
-                self.frame_time = time.time() - start_time
+                # 计算实际帧率
+                self.frame_time = time.time() - current_time
+                actual_fps = 1.0 / max(0.001, self.frame_time)
                 
                 # 显示性能信息
-                fps = 1.0 / max(0.001, self.frame_time)  # 避免除以零
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
-                    print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS | 3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
-                
-                # 设置更短的等待时间，提高响应速度
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("\nUser requested exit")
-                    break
+                    if self.is_video_input:
+                        progress = (self.frame_counter / self.frame_count) * 100
+                        print(f"\r显示帧率: {actual_fps:.1f} FPS | "
+                              f"YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
+                              f"3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS | "
+                              f"进度: {progress:.1f}%", end="")
+                    else:
+                        print(f"\r显示帧率: {actual_fps:.1f} FPS | "
+                              f"YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
+                              f"3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
                     
         except KeyboardInterrupt:
-            print("\nUser interrupted program")
+            print("\n用户中断程序")
         finally:
             # 停止所有线程
             stop_event.set()
+            
+            # 关闭进度条
+            if self.is_video_input and 'pbar' in locals():
+                pbar.close()
             
             # 保存结果
             self.save_results_to_file()
@@ -948,8 +1026,12 @@ def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='Real-time Pose Estimation - Fixed 243-frame Sequence Processing')
     
-    # Basic Parameters
-    parser.add_argument('--camera_id', type=int, default=0, help='Camera device ID')
+    # Input Source Parameters
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument('--camera_id', type=int, default=None, help='Camera device ID')
+    input_group.add_argument('--video_path', type=str, default=None, help='Path to input video file')
+    
+    # Output Parameters
     parser.add_argument('--output_dir', type=str, default='./output', help='Output directory for saving results')
     
     # Model Parameters
@@ -965,12 +1047,27 @@ def parse_args():
     # Other Parameters
     parser.add_argument('--conf_thresh', type=float, default=0.5, 
                        help='Confidence threshold for keypoints, below which previous frame keypoints will be used')
+    parser.add_argument('--force_fps', type=float, default=None,
+                       help='Force specific FPS for video playback (overrides source FPS)')
     
     args = parser.parse_args()
     
     # Set default behaviors
     args.save_results = True  # Always save results to file
-    args.video_fps_limit = 30  # Default frame rate limit to 30 FPS
+    
+    # 如果既没有指定摄像头也没有指定视频文件，默认使用摄像头0
+    if args.camera_id is None and args.video_path is None:
+        args.camera_id = 0
+    
+    # 视频帧率限制逻辑
+    if args.force_fps:
+        args.video_fps_limit = args.force_fps
+    elif args.video_path:
+        # 对于视频文件，不限制帧率，使用视频原始帧率
+        args.video_fps_limit = 0
+    else:
+        # 对于摄像头输入，默认限制30fps
+        args.video_fps_limit = 30
     
     return args
     
