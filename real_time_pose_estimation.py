@@ -210,21 +210,32 @@ class PoseEstimator:
             scores = keypoints[:, 2]  # [17]
             
             # 应用置信度阈值过滤
-            if len(self.all_keypoints) > 0:
+            if len(self.all_keypoints) > 0 and len(self.all_keypoints[-1]) == 17:
                 # 对于低置信度的关键点，使用上一帧的对应关键点
                 low_conf_mask = scores < self.args.conf_thresh
                 if np.any(low_conf_mask):
                     kpts_xy[low_conf_mask] = self.all_keypoints[-1][low_conf_mask]
                     scores[low_conf_mask] = self.all_scores[-1][low_conf_mask]
+                
+            # 更新最后一次有效检测的时间
+            self.last_valid_detection_time = time.time()
         else:
-            # 如果没有检测到人，使用上一帧的关键点或零填充
-            if len(self.all_keypoints) > 0:
-                kpts_xy = self.all_keypoints[-1]
-                scores = self.all_scores[-1]
+            # 如果没有检测到人体
+            if not hasattr(self, 'last_valid_detection_time'):
+                self.last_valid_detection_time = 0
+            
+            # 计算自上次有效检测的时间
+            time_since_last_detection = time.time() - self.last_valid_detection_time
+            
+            # 如果在3秒内丢失检测，使用上一帧的关键点
+            if len(self.all_keypoints) > 0 and len(self.all_keypoints[-1]) == 17 and time_since_last_detection < 3.0:
+                kpts_xy = self.all_keypoints[-1].copy()
+                scores = self.all_scores[-1].copy()
             else:
+                # 如果丢失检测超过3秒或没有历史关键点，返回零数组
                 kpts_xy = np.zeros((17, 2))
                 scores = np.zeros(17)
-                
+            
         self.yolo_time = time.time() - start_time
         return kpts_xy, scores
         
@@ -365,6 +376,21 @@ class PoseEstimator:
         返回:
             img: 3D可视化图像
         """
+        # 帧率控制 - 更严格的实现
+        current_time = time.time()
+        if not hasattr(self, 'last_render_time'):
+            self.last_render_time = current_time
+        else:
+            time_since_last_render = current_time - self.last_render_time
+            target_render_time = 1.0 / 30.0  # 限制渲染帧率为30FPS
+            
+            if time_since_last_render < target_render_time:
+                # 如果距离上次渲染时间太短，直接返回None
+                return None
+            
+        # 更新最后渲染时间
+        self.last_render_time = current_time
+        
         # 预先测量渲染时间开始
         render_start = time.time()
         
@@ -573,14 +599,20 @@ class PoseEstimator:
         buffer_keypoints = []  # 用于存储关键点序列
         is_warmup = True  # 预热标志
         sequence_counter = 0  # 序列计数器
+        
+        # 序列播放管理
         current_sequence = None  # 当前播放的序列
-        current_frame_idx = 0  # 当前播放帧索引
+        next_sequence = None    # 下一个待播放的序列
+        current_frame_idx = 0   # 当前播放帧索引
         
         # 性能监控变量
         prediction_times = []  # 记录预测时间
         last_sequence_end_time = time.time()  # 上一个序列结束时间
         last_frame_update = time.time()  # 上一帧更新时间
         target_frame_time = 1.0 / 30.0  # 目标帧间隔时间(30FPS)
+        
+        # 人体检测状态
+        no_person_counter = 0  # 计数器：连续多少帧没有检测到人
         
         print("\n=== System Warmup Phase ===")
         print("Collecting initial 243 frames...")
@@ -598,6 +630,8 @@ class PoseEstimator:
                     is_valid_keypoints = not np.all(keypoints == 0)
                     
                     if is_valid_keypoints:
+                        # 重置无人计数器
+                        no_person_counter = 0
                         # 添加到缓冲区
                         buffer_keypoints.append(keypoints)
                         
@@ -605,44 +639,59 @@ class PoseEstimator:
                         if is_warmup and len(buffer_keypoints) % 30 == 0:  # 每30帧更新一次
                             progress = (len(buffer_keypoints) / 243) * 100
                             print(f"\rWarmup Progress: {progress:.1f}% ({len(buffer_keypoints)}/243 frames)", end="")
+                    else:
+                        # 增加无人计数器
+                        no_person_counter += 1
                         
-                        # 当积累了243帧时进行处理
-                        if len(buffer_keypoints) >= 243:
-                            sequence_start_time = time.time()
-                            
-                            # 准备输入数据
-                            input_keypoints = np.array(buffer_keypoints[:243])  # 取前243帧
-                            
-                            # 预测3D姿态序列
-                            pose_3d_sequence = self.predict_3d_pose(input_keypoints)
-                            current_sequence = pose_3d_sequence
+                        # 如果连续30帧（约1秒）没有检测到人，清空缓冲区
+                        if no_person_counter >= 30:
+                            if len(buffer_keypoints) > 0:
+                                print("\nNo person detected for 1 second, clearing buffer...")
+                                buffer_keypoints = []
+                                no_person_counter = 0
+                    
+                    # 当积累了243帧时进行处理
+                    if len(buffer_keypoints) >= 243:
+                        sequence_start_time = time.time()
+                        
+                        # 准备输入数据
+                        input_keypoints = np.array(buffer_keypoints[:243])  # 取前243帧
+                        
+                        # 预测3D姿态序列
+                        new_sequence = self.predict_3d_pose(input_keypoints)
+                        
+                        # 更新序列管理
+                        if current_sequence is None:
+                            current_sequence = new_sequence
                             current_frame_idx = 0
-                            
-                            # 计算处理时间
-                            prediction_time = time.time() - sequence_start_time
-                            prediction_times.append(prediction_time)
-                            
-                            # 更新序列计数
-                            sequence_counter += 1
-                            
-                            # 如果是预热阶段
-                            if is_warmup:
-                                print("\n\n=== Warmup Complete ===")
-                                print(f"First prediction time: {prediction_time:.2f}s")
-                                print("Starting normal prediction flow...\n")
-                                is_warmup = False
-                            else:
-                                # 计算序列间隔时间
-                                sequence_interval = time.time() - last_sequence_end_time
-                                avg_prediction_time = np.mean(prediction_times)
-                                print(f"\rSequence #{sequence_counter} completed "
-                                      f"(Process time: {prediction_time:.2f}s, "
-                                      f"Average: {avg_prediction_time:.2f}s, "
-                                      f"Interval: {sequence_interval:.2f}s)", end="")
-                            
-                            # 清空缓冲区，准备下一个序列
-                            buffer_keypoints = buffer_keypoints[243:]
-                            last_sequence_end_time = time.time()
+                        else:
+                            next_sequence = new_sequence
+                        
+                        # 计算处理时间
+                        prediction_time = time.time() - sequence_start_time
+                        prediction_times.append(prediction_time)
+                        
+                        # 更新序列计数
+                        sequence_counter += 1
+                        
+                        # 如果是预热阶段
+                        if is_warmup:
+                            print("\n\n=== Warmup Complete ===")
+                            print(f"First prediction time: {prediction_time:.2f}s")
+                            print("Starting normal prediction flow...\n")
+                            is_warmup = False
+                        else:
+                            # 计算序列间隔时间
+                            sequence_interval = time.time() - last_sequence_end_time
+                            avg_prediction_time = np.mean(prediction_times)
+                            print(f"\rSequence #{sequence_counter} completed "
+                                  f"(Process time: {prediction_time:.2f}s, "
+                                  f"Average: {avg_prediction_time:.2f}s, "
+                                  f"Interval: {sequence_interval:.2f}s)", end="")
+                        
+                        # 清空缓冲区，准备下一个序列
+                        buffer_keypoints = buffer_keypoints[243:]
+                        last_sequence_end_time = time.time()
                 
                 # 处理3D可视化更新
                 if current_sequence is not None and self.visualization_mode:
@@ -651,21 +700,33 @@ class PoseEstimator:
                         # 创建3D可视化
                         vis_3d = self.create_3d_visualization(current_sequence[current_frame_idx])
                         
-                        # 添加序列播放信息
-                        cv2.putText(vis_3d, f"Sequence #{sequence_counter}", (10, 90), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.putText(vis_3d, f"Frame {current_frame_idx + 1}/243", (10, 120), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        
-                        # 清空可视化队列并放入新帧
-                        with visualization_3d_queue.mutex:
-                            visualization_3d_queue.queue.clear()
-                        visualization_3d_queue.put(vis_3d)
-                        
-                        # 更新帧索引
-                        current_frame_idx = (current_frame_idx + 1) % 243
-                        last_frame_update = current_time
-                        
+                        # 只有当渲染成功时才更新显示
+                        if vis_3d is not None:
+                            # 添加序列播放信息
+                            cv2.putText(vis_3d, f"Sequence #{sequence_counter}", (10, 90), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.putText(vis_3d, f"Frame {current_frame_idx + 1}/243", (10, 120), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            
+                            # 清空可视化队列并放入新帧
+                            with visualization_3d_queue.mutex:
+                                visualization_3d_queue.queue.clear()
+                            visualization_3d_queue.put(vis_3d)
+                            
+                            # 更新帧索引和序列
+                            current_frame_idx += 1
+                            if current_frame_idx >= 243:
+                                if next_sequence is not None:
+                                    # 如果有下一个序列准备好了，就切换到下一个序列
+                                    current_sequence = next_sequence
+                                    next_sequence = None
+                                    current_frame_idx = 0
+                                else:
+                                    # 如果下一个序列还没准备好，就停在当前序列的最后一帧
+                                    current_frame_idx = 242
+                            
+                            last_frame_update = current_time
+                
                 elif self.visualization_mode:
                     # 显示等待状态
                     blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
