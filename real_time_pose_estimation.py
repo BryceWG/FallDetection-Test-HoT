@@ -514,27 +514,54 @@ class PoseEstimator:
         if not self.save_results or len(self.all_keypoints) == 0:
             return
             
-        print("Saving results to file...")
+        print("\n保存结果到文件...")
         
-        # 转换2D关键点到HRNet格式
-        keypoints_array = np.array(self.all_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
-        scores_array = np.array(self.all_scores)[np.newaxis, ...]  # [1, T, 17]
-        
-        # 转换格式
-        keypoints_hrnet = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
-        scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
-        
-        # 保存2D关键点
-        output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
-        np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
-        
-        # 保存3D姿态
-        if len(self.all_poses_3d) > 0:
-            output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
-            poses_3d_array = np.array(self.all_poses_3d)
-            np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
+        try:
+            # 过滤出有效的关键点数据
+            valid_keypoints = []
+            valid_scores = []
+            valid_poses_3d = []
             
-        print(f"Results saved to {self.output_dir}")
+            for i, (keypoints, scores) in enumerate(zip(self.all_keypoints, self.all_scores)):
+                # 检查关键点数组的形状和有效性
+                if isinstance(keypoints, np.ndarray) and keypoints.shape == (17, 2):
+                    valid_keypoints.append(keypoints)
+                    valid_scores.append(scores)
+                    if i < len(self.all_poses_3d):
+                        valid_poses_3d.append(self.all_poses_3d[i])
+            
+            if len(valid_keypoints) == 0:
+                print("没有有效的关键点数据可以保存")
+                return
+                
+            print(f"处理了 {len(self.all_keypoints)} 帧，其中有效帧数: {len(valid_keypoints)}")
+            
+            # 转换2D关键点到HRNet格式
+            keypoints_array = np.array(valid_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
+            scores_array = np.array(valid_scores)[np.newaxis, ...]  # [1, T, 17]
+            
+            # 转换格式
+            keypoints_hrnet = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
+            scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
+            
+            # 保存2D关键点
+            output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
+            np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
+            print(f"2D关键点数据已保存到: {output_2d_path}")
+            
+            # 保存3D姿态
+            if len(valid_poses_3d) > 0:
+                output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+                poses_3d_array = np.array(valid_poses_3d)
+                np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
+                print(f"3D姿态数据已保存到: {output_3d_path}")
+                
+            print(f"所有结果已保存到目录: {self.output_dir}")
+            
+        except Exception as e:
+            print(f"保存结果时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
 
     def extract_2d_pose_thread(self):
         """2D姿态提取线程"""
