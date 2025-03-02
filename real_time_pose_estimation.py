@@ -455,9 +455,10 @@ class PoseEstimator:
         # 一次性计算所有关键点2D坐标，提高效率
         points_2d = []
         for point in pose_3d_world:
-            # 简化的3D到2D投影
+            # 简化的3D到2D投影，翻转Z轴方向
             x = point[0] * np.cos(theta) - point[1] * np.sin(theta)
-            y = point[2] * np.cos(phi) - (point[0] * np.sin(theta) + point[1] * np.cos(theta)) * np.sin(phi)
+            # 注意这里改变了y的计算方式，将point[2]前的符号改为负号
+            y = -point[2] * np.cos(phi) - (point[0] * np.sin(theta) + point[1] * np.cos(theta)) * np.sin(phi)
             
             # 缩放和平移
             x = int(x * scale + center_x)
@@ -480,8 +481,8 @@ class PoseEstimator:
         cv2.line(img, origin, y_axis, (0, 255, 0), 2)  # 绿色
         cv2.putText(img, "Y", y_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
-        # Z轴
-        z_axis = (int(origin[0]), int(origin[1] + axis_length * np.cos(phi)))
+        # Z轴 - 注意这里也需要翻转Z轴方向
+        z_axis = (int(origin[0]), int(origin[1] - axis_length * np.cos(phi)))  # 改为减号
         cv2.line(img, origin, z_axis, (255, 0, 0), 2)  # 蓝色
         cv2.putText(img, "Z", z_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
         
