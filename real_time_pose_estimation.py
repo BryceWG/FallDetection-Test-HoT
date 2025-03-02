@@ -613,10 +613,10 @@ class PoseEstimator:
         
         # 人体检测状态
         no_person_counter = 0  # 计数器：连续多少帧没有检测到人
+        last_valid_keypoints = None  # 最后一个有效的关键点
+        sequence_started = False  # 标记是否已经开始收集序列
         
-        print("\n=== System Warmup Phase ===")
-        print("Collecting initial 243 frames...")
-        print("Expected warmup time: 8-10 seconds\n")
+        print("\n=== 等待检测到人体... ===")
         
         while not stop_event.is_set():
             try:
@@ -632,30 +632,62 @@ class PoseEstimator:
                     if is_valid_keypoints:
                         # 重置无人计数器
                         no_person_counter = 0
+                        # 更新最后一个有效关键点
+                        last_valid_keypoints = keypoints.copy()
+                        
+                        # 如果还没开始收集序列，现在开始
+                        if not sequence_started:
+                            sequence_started = True
+                            is_warmup = True
+                            print("\n=== 检测到人体，开始收集序列 ===")
+                            print("收集初始243帧...")
+                            print("预计预热时间: 8-10秒\n")
+                            
                         # 添加到缓冲区
                         buffer_keypoints.append(keypoints)
                         
                         # 在预热阶段显示进度
-                        if is_warmup and len(buffer_keypoints) % 30 == 0:  # 每30帧更新一次
+                        if is_warmup and len(buffer_keypoints) % 30 == 0:
                             progress = (len(buffer_keypoints) / 243) * 100
-                            print(f"\rWarmup Progress: {progress:.1f}% ({len(buffer_keypoints)}/243 frames)", end="")
+                            print(f"\r预热进度: {progress:.1f}% ({len(buffer_keypoints)}/243 帧)", end="")
                     else:
                         # 增加无人计数器
                         no_person_counter += 1
                         
-                        # 如果连续30帧（约1秒）没有检测到人，清空缓冲区
-                        if no_person_counter >= 30:
-                            if len(buffer_keypoints) > 0:
-                                print("\nNo person detected for 1 second, clearing buffer...")
-                                buffer_keypoints = []
-                                no_person_counter = 0
+                        if sequence_started:
+                            # 如果序列已经开始，处理无人情况
+                            if no_person_counter >= 90:  # 3秒无人
+                                if len(buffer_keypoints) < 50:
+                                    # 如果缓冲区帧数较少，清空并重置
+                                    print("\n\n=== 长时间未检测到人体，重置序列 ===")
+                                    buffer_keypoints = []
+                                    sequence_started = False
+                                    is_warmup = True
+                                    last_valid_keypoints = None
+                                    current_sequence = None
+                                    next_sequence = None
+                                    continue
+                                elif len(buffer_keypoints) >= 243:
+                                    # 如果已经收集了完整序列，停止继续处理
+                                    print("\n\n=== 序列完成后未检测到人体，等待新的人体出现 ===")
+                                    buffer_keypoints = []
+                                    sequence_started = False
+                                    is_warmup = True
+                                    last_valid_keypoints = None
+                                    continue
+                            
+                            # 使用最后的有效关键点填充
+                            if last_valid_keypoints is not None and len(buffer_keypoints) > 0:
+                                buffer_keypoints.append(last_valid_keypoints.copy())
+                                if len(buffer_keypoints) % 30 == 0:
+                                    print(f"\r使用最后的有效关键点填充序列 ({len(buffer_keypoints)}/243 帧)", end="")
                     
                     # 当积累了243帧时进行处理
-                    if len(buffer_keypoints) >= 243:
+                    if sequence_started and len(buffer_keypoints) >= 243:
                         sequence_start_time = time.time()
                         
                         # 准备输入数据
-                        input_keypoints = np.array(buffer_keypoints[:243])  # 取前243帧
+                        input_keypoints = np.array(buffer_keypoints[:243])
                         
                         # 预测3D姿态序列
                         new_sequence = self.predict_3d_pose(input_keypoints)
@@ -676,18 +708,18 @@ class PoseEstimator:
                         
                         # 如果是预热阶段
                         if is_warmup:
-                            print("\n\n=== Warmup Complete ===")
-                            print(f"First prediction time: {prediction_time:.2f}s")
-                            print("Starting normal prediction flow...\n")
+                            print("\n\n=== 预热完成 ===")
+                            print(f"首次预测时间: {prediction_time:.2f}秒")
+                            print("开始正常预测流程...\n")
                             is_warmup = False
                         else:
                             # 计算序列间隔时间
                             sequence_interval = time.time() - last_sequence_end_time
                             avg_prediction_time = np.mean(prediction_times)
-                            print(f"\rSequence #{sequence_counter} completed "
-                                  f"(Process time: {prediction_time:.2f}s, "
-                                  f"Average: {avg_prediction_time:.2f}s, "
-                                  f"Interval: {sequence_interval:.2f}s)", end="")
+                            print(f"\r序列 #{sequence_counter} 完成 "
+                                  f"(处理时间: {prediction_time:.2f}秒, "
+                                  f"平均: {avg_prediction_time:.2f}秒, "
+                                  f"间隔: {sequence_interval:.2f}秒)", end="")
                         
                         # 清空缓冲区，准备下一个序列
                         buffer_keypoints = buffer_keypoints[243:]
@@ -703,9 +735,9 @@ class PoseEstimator:
                         # 只有当渲染成功时才更新显示
                         if vis_3d is not None:
                             # 添加序列播放信息
-                            cv2.putText(vis_3d, f"Sequence #{sequence_counter}", (10, 90), 
+                            cv2.putText(vis_3d, f"序列 #{sequence_counter}", (10, 90), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            cv2.putText(vis_3d, f"Frame {current_frame_idx + 1}/243", (10, 120), 
+                            cv2.putText(vis_3d, f"帧 {current_frame_idx + 1}/243", (10, 120), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             # 清空可视化队列并放入新帧
@@ -730,24 +762,27 @@ class PoseEstimator:
                 elif self.visualization_mode:
                     # 显示等待状态
                     blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                    if is_warmup:
-                        status_text = f"System Warming Up... ({len(buffer_keypoints)}/243 frames)"
+                    if not sequence_started:
+                        status_text = "等待检测到人体..."
+                        cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    elif is_warmup:
+                        status_text = f"系统预热中... ({len(buffer_keypoints)}/243 帧)"
                         frames_remaining = 243 - len(buffer_keypoints)
-                        time_remaining = f"Estimated time remaining: {frames_remaining/30:.1f}s"
+                        time_remaining = f"预计剩余时间: {frames_remaining/30:.1f}秒"
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(blank_3d, time_remaining, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     else:
                         if len(buffer_keypoints) > 0:
-                            status_text = f"Processing next sequence... ({len(buffer_keypoints)}/243 frames)"
+                            status_text = f"处理下一个序列中... ({len(buffer_keypoints)}/243 帧)"
                             frames_remaining = 243 - len(buffer_keypoints)
-                            time_remaining = f"Estimated time remaining: {frames_remaining/30:.1f}s"
+                            time_remaining = f"预计剩余时间: {frames_remaining/30:.1f}秒"
                             cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             cv2.putText(blank_3d, time_remaining, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         else:
-                            cv2.putText(blank_3d, "Waiting for next sequence...", (10, 30), 
+                            cv2.putText(blank_3d, "等待下一个序列...", (10, 30), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
-                        cv2.putText(blank_3d, f"Completed sequences: {sequence_counter}", (10, 90), 
+                        cv2.putText(blank_3d, f"已完成序列数: {sequence_counter}", (10, 90), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     
                     # 放入队列
@@ -759,19 +794,19 @@ class PoseEstimator:
                 time.sleep(0.001)
                 
             except Exception as e:
-                print(f"\n3D Pose Prediction Thread Error: {e}")
+                print(f"\n3D姿态预测线程错误: {e}")
                 import traceback
                 traceback.print_exc()
                 
         # 处理程序退出时的剩余帧
-        if len(buffer_keypoints) > 0:
-            print("\n\n=== Processing Remaining Frames ===")
-            print(f"Remaining frames: {len(buffer_keypoints)}")
+        if sequence_started and len(buffer_keypoints) > 0:
+            print("\n\n=== 处理剩余帧 ===")
+            print(f"剩余帧数: {len(buffer_keypoints)}")
             
             # 如果剩余帧数不足243，通过复制最后一帧来填充
             if len(buffer_keypoints) < 243:
                 pad_length = 243 - len(buffer_keypoints)
-                print(f"Padding {pad_length} frames to complete the last sequence")
+                print(f"填充{pad_length}帧以完成最后一个序列")
                 buffer_keypoints.extend([buffer_keypoints[-1]] * pad_length)
             
             # 处理最后一个序列
@@ -782,7 +817,7 @@ class PoseEstimator:
             if self.save_results:
                 self.all_poses_3d.append(pose_3d_sequence[-1])
                 
-            print("All frames processed")
+            print("所有帧处理完成")
 
     def run(self):
         """运行姿态估计pipeline"""
