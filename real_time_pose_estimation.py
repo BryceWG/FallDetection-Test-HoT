@@ -41,13 +41,13 @@ class PoseEstimator:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.visualization_mode = args.visualization
         self.output_dir = args.output_dir
-        self.save_results = args.save_results
+        self.save_results = True  # 默认启用结果保存
         self.frame_counter = 0
         self.fps_limit = args.video_fps_limit
         self.use_opencv_render = args.use_opencv_render  # 使用OpenCV渲染标志
         
         # 固定窗口批量处理相关变量
-        self.use_fixed_window = args.use_fixed_window
+        self.use_fixed_window = True  # 默认使用固定窗口处理
         self.window_size = 243  # 固定窗口大小，由模型架构决定
         self.warmup_completed = False  # 预热完成标志
         self.warmup_frames_collected = 0  # 已收集的预热帧数
@@ -67,23 +67,19 @@ class PoseEstimator:
         self.total_frames_processed = 0  # 已处理的总帧数
         
         # 打印重要的配置信息
-        print(f"\n=== 系统配置 ===")
-        print(f"设备: {self.device}")
+        print(f"\n=== System Configuration ===")
+        print(f"Device: {self.device}")
         if self.device.type == 'cuda':
-            print(f"CUDA设备: {torch.cuda.get_device_name(0)}")
-        print(f"可视化模式: {'启用' if self.visualization_mode else '禁用'}")
-        print(f"3D渲染方式: {'OpenCV (快速)' if self.use_opencv_render else 'Matplotlib (详细)'}")
-        print(f"窗口处理模式: {'固定窗口批量处理' if self.use_fixed_window else '滑动窗口连续处理'}")
-        if self.use_fixed_window:
-            print(f"窗口大小: {self.window_size} 帧")
-            print(f"估计延迟: 约 {self.estimated_delay} 秒")
-        else:
-            print(f"3D更新最小帧率: {args.min_3d_update_fps} FPS")
-        print(f"结果保存: {'启用' if self.save_results else '禁用'}")
-        if self.save_results:
-            print(f"输出目录: {self.output_dir}")
+            print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
+        print(f"Visualization Mode: {'Enabled' if self.visualization_mode else 'Disabled'}")
+        print(f"3D Rendering Method: {'OpenCV (Fast)' if self.use_opencv_render else 'Matplotlib (Detailed)'}")
+        print(f"Window Processing Mode: {'Fixed Window Batch Processing'}")
+        print(f"Window Size: {self.window_size} frames")
+        print(f"Estimated Delay: ~{self.estimated_delay} seconds")
+        print(f"Save Results: Enabled")
+        print(f"Output Directory: {self.output_dir}")
         if self.fps_limit > 0:
-            print(f"视频帧率限制: {self.fps_limit} FPS")
+            print(f"Video FPS Limit: {self.fps_limit} FPS")
         print(f"==============\n")
         
         # 创建输出目录
@@ -118,20 +114,20 @@ class PoseEstimator:
         self.last_frame_time = time.time()
         
         # 设置3D可视化参数
+        # OpenCV 3D渲染参数 - 无论是否可视化都需要初始化，因为保存结果时可能会用到
+        self.render_size = (800, 800)  # 渲染尺寸
+        self.render_background = (255, 255, 255)  # 白色背景
+        self.render_scale = 150  # 缩放因子
+        self.render_center = (400, 400)  # 中心点
+        self.render_azimuth = 70  # 方位角(度)
+        self.render_elevation = 15  # 仰角(度)
+        
         if self.visualization_mode:
             if not self.use_opencv_render:
                 # 使用原来的Matplotlib方式
                 self.fig = plt.figure(figsize=(5, 5))
                 self.ax = self.fig.add_subplot(111, projection='3d')
                 self.canvas = FigureCanvasAgg(self.fig)
-            else:
-                # OpenCV 3D渲染参数
-                self.render_size = (800, 800)  # 渲染尺寸
-                self.render_background = (255, 255, 255)  # 白色背景
-                self.render_scale = 150  # 缩放因子
-                self.render_center = (400, 400)  # 中心点
-                self.render_azimuth = 70  # 方位角(度)
-                self.render_elevation = 15  # 仰角(度)
             
         # 四元数旋转参数（用于3D坐标转换）
         self.rot = np.array([0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088], 
@@ -139,17 +135,17 @@ class PoseEstimator:
             
     def _init_yolo_model(self):
         """初始化YOLO模型"""
-        print("正在加载YOLO模型...")
+        print("Loading YOLO model...")
         try:
             self.yolo_model = YOLO(self.args.yolo_model)
-            print("YOLO模型加载成功")
+            print("YOLO model loaded successfully")
         except Exception as e:
-            print(f"加载YOLO模型时出错: {e}")
+            print(f"Error loading YOLO model: {e}")
             sys.exit(1)
             
     def _init_mixste_model(self):
         """初始化MixSTE模型"""
-        print("正在加载MixSTE模型...")
+        print("Loading MixSTE model...")
         try:
             # 配置模型参数
             self.mixste_args = self._get_mixste_args()
@@ -167,9 +163,9 @@ class PoseEstimator:
             
             # 设置为评估模式
             self.mixste_model.eval()
-            print("MixSTE模型加载成功")
+            print("MixSTE model loaded successfully")
         except Exception as e:
-            print(f"加载MixSTE模型时出错: {e}")
+            print(f"Error loading MixSTE model: {e}")
             sys.exit(1)
             
     def _get_mixste_args(self):
@@ -188,26 +184,26 @@ class PoseEstimator:
             
     def setup_camera(self):
         """设置摄像头"""
-        print(f"正在初始化摄像头 (ID: {self.args.camera_id})...")
+        print(f"Initializing camera (ID: {self.args.camera_id})...")
         self.cap = cv2.VideoCapture(self.args.camera_id)
         
         # 检查摄像头是否正常打开
         if not self.cap.isOpened():
-            print("无法打开摄像头")
+            print("Cannot open camera")
             sys.exit(1)
             
         # 获取摄像头信息，不再手动设置分辨率
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        print(f"摄像头初始化成功，分辨率: {self.frame_width}x{self.frame_height}")
+        print(f"Camera initialized successfully, resolution: {self.frame_width}x{self.frame_height}")
         
     def release_resources(self):
         """释放资源"""
         if self.cap and self.cap.isOpened():
             self.cap.release()
         cv2.destroyAllWindows()
-        print("资源已释放")
+        print("Resources released")
         
     def extract_2d_pose(self, frame):
         """
@@ -236,16 +232,20 @@ class PoseEstimator:
             
             # 应用置信度阈值过滤
             if len(self.all_keypoints) > 0:
-                # 对于低置信度的关键点，使用上一帧的对应关键点
-                low_conf_mask = scores < self.args.conf_thresh
-                if np.any(low_conf_mask):
-                    kpts_xy[low_conf_mask] = self.all_keypoints[-1][low_conf_mask]
-                    scores[low_conf_mask] = self.all_scores[-1][low_conf_mask]
+                try:
+                    # 对于低置信度的关键点，使用上一帧的对应关键点
+                    low_conf_mask = scores < self.args.conf_thresh
+                    if np.any(low_conf_mask) and len(self.all_keypoints[-1]) == len(low_conf_mask):
+                        kpts_xy[low_conf_mask] = self.all_keypoints[-1][low_conf_mask]
+                        scores[low_conf_mask] = self.all_scores[-1][low_conf_mask]
+                except Exception as e:
+                    print(f"Error applying confidence threshold: {e}")
+                    # 如果出错，不应用任何过滤
         else:
             # 如果没有检测到人，使用上一帧的关键点或零填充
             if len(self.all_keypoints) > 0:
-                kpts_xy = self.all_keypoints[-1]
-                scores = self.all_scores[-1]
+                kpts_xy = self.all_keypoints[-1].copy()  # 使用copy以避免修改原始数据
+                scores = self.all_scores[-1].copy()
             else:
                 kpts_xy = np.zeros((17, 2))
                 scores = np.zeros(17)
@@ -267,14 +267,8 @@ class PoseEstimator:
         
         window_size = self.mixste_args.frames
         
-        # 检查是否使用固定窗口模式
-        if self.use_fixed_window:
-            # 确保输入的帧数等于窗口大小
-            assert len(input_keypoints) == window_size, f"固定窗口模式下输入帧数应为{window_size}，实际为{len(input_keypoints)}"
-        else:
-            # 滑动窗口模式下可能需要填充
-            # 注意：输入关键点应该已经在predict_3d_pose_thread中处理过，确保长度为self.mixste_args.frames
-            assert len(input_keypoints) == window_size, f"输入帧数应为{window_size}，实际为{len(input_keypoints)}"
+        # 确保输入的帧数等于窗口大小
+        assert len(input_keypoints) == window_size, f"输入帧数应为{window_size}，实际为{len(input_keypoints)}"
         
         # 将输入关键点转换为需要的格式
         input_keypoints_array = np.array(input_keypoints)[np.newaxis, ...]  # [1, F, 17, 2]
@@ -388,206 +382,198 @@ class PoseEstimator:
         返回:
             img: 3D可视化图像
         """
-        # 预先测量渲染时间开始
-        render_start = time.time()
-        
-        # 坐标转换
-        pose_3d_world = camera_to_world(pose_3d.copy(), R=self.rot, t=0)
-        pose_3d_world[:, 2] -= np.min(pose_3d_world[:, 2])
-        
-        # 创建空白图像
-        img = np.ones((self.render_size[0], self.render_size[1], 3), dtype=np.uint8) * 255
-        
-        # 添加网格（更好的3D感知）- 在绘制骨架前绘制网格
-        grid_step = 50
-        grid_size = 1  # 减小网格线宽度
-        grid_color = (240, 240, 240)  # 更浅的网格颜色
-        
-        # 绘制水平线和垂直线形成网格
-        for i in range(0, img.shape[0], grid_step):
-            cv2.line(img, (0, i), (img.shape[1], i), grid_color, grid_size)
+        try:
+            # 预先测量渲染时间开始
+            render_start = time.time()
             
-        for i in range(0, img.shape[1], grid_step):
-            cv2.line(img, (i, 0), (i, img.shape[0]), grid_color, grid_size)
-        
-        # 3D到2D的投影参数
-        scale = self.render_scale
-        center_x, center_y = self.render_center
-        
-        # 应用旋转矩阵 (简化版)
-        theta = np.radians(self.render_azimuth)  # azimuth
-        phi = np.radians(self.render_elevation)    # elevation
-        
-        # 一次性计算所有关键点2D坐标，提高效率
-        points_2d = []
-        for point in pose_3d_world:
-            # 简化的3D到2D投影
-            x = point[0] * np.cos(theta) - point[1] * np.sin(theta)
-            y = point[2] * np.cos(phi) - (point[0] * np.sin(theta) + point[1] * np.cos(theta)) * np.sin(phi)
+            # 确保必要的属性存在，如果不存在则使用默认值
+            render_size = getattr(self, 'render_size', (800, 800))
+            render_scale = getattr(self, 'render_scale', 150)
+            render_center = getattr(self, 'render_center', (400, 400))
+            render_azimuth = getattr(self, 'render_azimuth', 70)
+            render_elevation = getattr(self, 'render_elevation', 15)
             
-            # 缩放和平移
-            x = int(x * scale + center_x)
-            y = int(y * scale + center_y)
-            points_2d.append((x, y))
-        
-        # 绘制坐标系参考轴 (X: 红色, Y: 绿色, Z: 蓝色) - 先绘制参考轴
-        origin = points_2d[0]  # 使用根关节点作为原点
-        axis_length = 50
-        
-        # X轴
-        x_axis = (int(origin[0] + axis_length * np.cos(theta)), 
-                 int(origin[1] - axis_length * np.sin(phi) * np.sin(theta)))
-        cv2.line(img, origin, x_axis, (0, 0, 255), 2)  # 红色
-        cv2.putText(img, "X", x_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        
-        # Y轴
-        y_axis = (int(origin[0] - axis_length * np.sin(theta)), 
-                 int(origin[1] - axis_length * np.sin(phi) * np.cos(theta)))
-        cv2.line(img, origin, y_axis, (0, 255, 0), 2)  # 绿色
-        cv2.putText(img, "Y", y_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
-        # Z轴
-        z_axis = (int(origin[0]), int(origin[1] + axis_length * np.cos(phi)))
-        cv2.line(img, origin, z_axis, (255, 0, 0), 2)  # 蓝色
-        cv2.putText(img, "Z", z_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-        
-        # 绘制骨架连接
-        connections = [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5],
-                      [5, 6], [0, 7], [7, 8], [8, 9], [9, 10],
-                      [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16]]
+            # 坐标转换
+            pose_3d_world = camera_to_world(pose_3d.copy(), R=self.rot, t=0)
+            pose_3d_world[:, 2] -= np.min(pose_3d_world[:, 2])
+            
+            # 创建空白图像
+            img = np.ones((render_size[0], render_size[1], 3), dtype=np.uint8) * 255
+            
+            # 添加网格（更好的3D感知）- 在绘制骨架前绘制网格
+            grid_step = 50
+            grid_size = 1  # 减小网格线宽度
+            grid_color = (240, 240, 240)  # 更浅的网格颜色
+            
+            # 绘制水平线和垂直线形成网格
+            for i in range(0, img.shape[0], grid_step):
+                cv2.line(img, (0, i), (img.shape[1], i), grid_color, grid_size)
+                
+            for i in range(0, img.shape[1], grid_step):
+                cv2.line(img, (i, 0), (i, img.shape[0]), grid_color, grid_size)
+            
+            # 3D到2D的投影参数
+            scale = render_scale
+            center_x, center_y = render_center
+            
+            # 应用旋转矩阵 (简化版)
+            theta = np.radians(render_azimuth)  # azimuth
+            phi = np.radians(render_elevation)    # elevation
+            
+            # 一次性计算所有关键点2D坐标，提高效率
+            points_2d = []
+            for point in pose_3d_world:
+                # 简化的3D到2D投影
+                x = point[0] * np.cos(theta) - point[1] * np.sin(theta)
+                y = point[2] * np.cos(phi) - (point[0] * np.sin(theta) + point[1] * np.cos(theta)) * np.sin(phi)
+                
+                # 缩放和平移
+                x = int(x * scale + center_x)
+                y = int(y * scale + center_y)
+                points_2d.append((x, y))
+            
+            # 绘制坐标系参考轴 (X: 红色, Y: 绿色, Z: 蓝色) - 先绘制参考轴
+            origin = points_2d[0]  # 使用根关节点作为原点
+            axis_length = 50
+            
+            # X轴
+            x_axis = (int(origin[0] + axis_length * np.cos(theta)), 
+                     int(origin[1] - axis_length * np.sin(phi) * np.sin(theta)))
+            cv2.line(img, origin, x_axis, (0, 0, 255), 2)  # 红色
+            cv2.putText(img, "X", x_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            # Y轴
+            y_axis = (int(origin[0] - axis_length * np.sin(theta)), 
+                     int(origin[1] - axis_length * np.sin(phi) * np.cos(theta)))
+            cv2.line(img, origin, y_axis, (0, 255, 0), 2)  # 绿色
+            cv2.putText(img, "Y", y_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # Z轴
+            z_axis = (int(origin[0]), int(origin[1] + axis_length * np.cos(phi)))
+            cv2.line(img, origin, z_axis, (255, 0, 0), 2)  # 蓝色
+            cv2.putText(img, "Z", z_axis, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+            
+            # 绘制骨架连接
+            connections = [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5],
+                          [5, 6], [0, 7], [7, 8], [8, 9], [9, 10],
+                          [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16]]
+                          
+            # 定义颜色: 绿色(左侧), 黄色(右侧), 蓝色(中线)
+            colors = [(138, 201, 38),    # 绿色 - 左侧
+                      (25, 130, 196),    # 蓝色 - 中线
+                      (255, 202, 58)]    # 黄色 - 右侧
                       
-        # 定义颜色: 绿色(左侧), 黄色(右侧), 蓝色(中线)
-        colors = [(138, 201, 38),    # 绿色 - 左侧
-                  (25, 130, 196),    # 蓝色 - 中线
-                  (255, 202, 58)]    # 黄色 - 右侧
-                  
-        # 定义左右侧: 1=左侧, 2=右侧, 3=中线
-        LR = [2, 2, 2, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 2, 2, 2]
-        
-        # 绘制连接线
-        for j, c in enumerate(connections):
-            pt1 = points_2d[c[0]]
-            pt2 = points_2d[c[1]]
-            # 确保点在图像范围内
-            if (0 <= pt1[0] < img.shape[1] and 0 <= pt1[1] < img.shape[0] and 
-                0 <= pt2[0] < img.shape[1] and 0 <= pt2[1] < img.shape[0]):
-                cv2.line(img, pt1, pt2, colors[LR[j]-1], 3)
-        
-        # 绘制关节点 - 在连线后绘制，使其位于顶层
-        for i, point in enumerate(points_2d):
-            if 0 <= point[0] < img.shape[1] and 0 <= point[1] < img.shape[0]:
-                cv2.circle(img, point, 5, (0, 0, 255), -1)
-        
-        # 计算实际渲染时间
-        current_render_time = time.time() - render_start
-        
-        # 计算实际更新间隔
-        time_since_last_update = time.time() - self.last_3d_update
-        
-        # 添加性能信息到图像
-        mixste_text = f"3D Prediction: {1.0/self.mixste_time:.1f} FPS"
-        render_text = f"Render Method: OpenCV ({current_render_time*1000:.1f}ms)"
-        update_text = f"Last Update: {time_since_last_update:.2f}s ago"
-        refresh_rate = f"Refresh Rate: {1.0/max(0.01, time_since_last_update):.1f} FPS"
-        render_fps_text = f"Pure Render: {1.0/max(0.001, current_render_time):.1f} FPS"
-        
-        # 添加半透明背景，使文字更容易阅读
-        overlay = img.copy()
-        cv2.rectangle(overlay, (5, img.shape[0]-145), (350, img.shape[0]-5), (255, 255, 255), -1)
-        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
-        
-        # 添加文字
-        cv2.putText(img, mixste_text, (10, img.shape[0] - 110), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, render_text, (10, img.shape[0] - 80), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, update_text, (10, img.shape[0] - 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, refresh_rate, (10, img.shape[0] - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, render_fps_text, (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        # 添加更新时间戳
-        timestamp = f"更新时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}"
-        cv2.putText(img, timestamp, (10, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        return img
+            # 定义左右侧: 1=左侧, 2=右侧, 3=中线
+            LR = [2, 2, 2, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 2, 2, 2]
+            
+            # 绘制连接线
+            for j, c in enumerate(connections):
+                pt1 = points_2d[c[0]]
+                pt2 = points_2d[c[1]]
+                # 确保点在图像范围内
+                if (0 <= pt1[0] < img.shape[1] and 0 <= pt1[1] < img.shape[0] and 
+                    0 <= pt2[0] < img.shape[1] and 0 <= pt2[1] < img.shape[0]):
+                    cv2.line(img, pt1, pt2, colors[LR[j]-1], 3)
+            
+            # 绘制关节点 - 在连线后绘制，使其位于顶层
+            for i, point in enumerate(points_2d):
+                if 0 <= point[0] < img.shape[1] and 0 <= point[1] < img.shape[0]:
+                    cv2.circle(img, point, 5, (0, 0, 255), -1)
+            
+            # 计算实际渲染时间
+            current_render_time = time.time() - render_start
+            
+            # 更新时间记录
+            last_3d_update = getattr(self, 'last_3d_update', time.time())
+            
+            # 计算实际更新间隔
+            time_since_last_update = time.time() - last_3d_update
+            
+            # 添加性能信息到图像
+            mixste_time = getattr(self, 'mixste_time', 0.1)
+            mixste_text = f"3D Prediction: {1.0/max(0.001, mixste_time):.1f} FPS"
+            render_text = f"Render Method: OpenCV ({current_render_time*1000:.1f}ms)"
+            update_text = f"Last Update: {time_since_last_update:.2f}s ago"
+            refresh_rate = f"Refresh Rate: {1.0/max(0.01, time_since_last_update):.1f} FPS"
+            render_fps_text = f"Pure Render: {1.0/max(0.001, current_render_time):.1f} FPS"
+            
+            # 添加半透明背景，使文字更容易阅读
+            overlay = img.copy()
+            cv2.rectangle(overlay, (5, img.shape[0]-145), (350, img.shape[0]-5), (255, 255, 255), -1)
+            cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+            
+            # 添加文字
+            cv2.putText(img, mixste_text, (10, img.shape[0] - 110), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(img, render_text, (10, img.shape[0] - 80), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(img, update_text, (10, img.shape[0] - 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(img, refresh_rate, (10, img.shape[0] - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(img, render_fps_text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # 添加更新时间戳
+            timestamp = f"Update Time: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}"
+            cv2.putText(img, timestamp, (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            return img
+            
+        except Exception as e:
+            print(f"OpenCV 3D rendering error: {e}")
+            # 创建一个显示错误信息的空白图像
+            img = np.ones((800, 800, 3), dtype=np.uint8) * 255
+            error_text = f"3D Rendering Error: {str(e)}"
+            cv2.putText(img, error_text, (10, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            return img
         
     def save_results_to_file(self):
         """保存结果到文件"""
         if not self.save_results:
             return
             
-        print("正在保存结果到文件...")
+        print("Saving results to file...")
         
-        # 判断使用哪种方式保存结果
-        if self.use_fixed_window:
-            # 固定窗口批处理模式
-            if len(self.all_window_predictions) == 0:
-                print("没有可用的预测结果")
-                return
-                
-            # 收集所有窗口的关键点和3D姿态
-            all_keypoints = []
-            all_scores = []
-            all_poses_3d = []
+        # 固定窗口批处理模式
+        if len(self.all_window_predictions) == 0:
+            print("No predictions available")
+            return
             
-            for window in self.all_window_predictions:
-                all_keypoints.extend(window['keypoints'])
-                all_scores.extend(window['scores'])
-                
-                # 对于3D姿态，目前每个窗口只有一个输出
-                # 复制这个姿态窗口大小次，以匹配帧数
-                window_poses = [window['pose_3d']] * len(window['keypoints'])
-                all_poses_3d.extend(window_poses)
-                
-            # 转换关键点到HRNet格式
-            keypoints_array = np.array(all_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
-            scores_array = np.array(all_scores)[np.newaxis, ...]  # [1, T, 17]
+        # 收集所有窗口的关键点和3D姿态
+        all_keypoints = []
+        all_scores = []
+        all_poses_3d = []
+        
+        for window in self.all_window_predictions:
+            all_keypoints.extend(window['keypoints'])
+            all_scores.extend(window['scores'])
             
-            # 转换格式
-            keypoints_hrnet = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
-            scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
+            # 对于3D姿态，目前每个窗口只有一个输出
+            # 复制这个姿态窗口大小次，以匹配帧数
+            window_poses = [window['pose_3d']] * len(window['keypoints'])
+            all_poses_3d.extend(window_poses)
             
-            # 保存2D关键点
-            output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
-            np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
+        # 转换关键点到HRNet格式
+        keypoints_array = np.array(all_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
+        scores_array = np.array(all_scores)[np.newaxis, ...]  # [1, T, 17]
+        
+        # 转换格式
+        keypoints_hrnet = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
+        scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
+        
+        # 保存2D关键点
+        output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
+        np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
+        
+        # 保存3D姿态
+        if len(all_poses_3d) > 0:
+            output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+            poses_3d_array = np.array(all_poses_3d)
+            np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
             
-            # 保存3D姿态
-            if len(all_poses_3d) > 0:
-                output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
-                poses_3d_array = np.array(all_poses_3d)
-                np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
-                
-            print(f"已保存 {len(all_keypoints)} 帧的结果到 {self.output_dir}")
-            
-        else:
-            # 滑动窗口连续处理模式
-            if len(self.all_keypoints) == 0:
-                print("没有可用的关键点数据")
-                return
-                
-            # 转换2D关键点到HRNet格式
-            keypoints_array = np.array(self.all_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
-            scores_array = np.array(self.all_scores)[np.newaxis, ...]  # [1, T, 17]
-            
-            # 转换格式
-            keypoints_hrnet = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
-            scores_hrnet = convert_yolov11_to_hrnet_scores(scores_array.copy())
-            
-            # 保存2D关键点
-            output_2d_path = os.path.join(self.output_dir, 'input_2D', 'input_keypoints_2d.npz')
-            np.savez_compressed(output_2d_path, reconstruction=keypoints_hrnet)
-            
-            # 保存3D姿态
-            if len(self.all_poses_3d) > 0:
-                output_3d_path = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
-                poses_3d_array = np.array(self.all_poses_3d)
-                np.savez_compressed(output_3d_path, reconstruction=poses_3d_array)
-                
-            print(f"已保存 {len(self.all_keypoints)} 帧的结果到 {self.output_dir}")
+        print(f"Saved {len(all_keypoints)} frames of results to {self.output_dir}")
 
     def extract_2d_pose_thread(self):
         """2D姿态提取线程"""
@@ -601,7 +587,13 @@ class PoseEstimator:
                     
                 frame = frame_queue.get()
                 
-                keypoints, scores = self.extract_2d_pose(frame)
+                try:
+                    keypoints, scores = self.extract_2d_pose(frame)
+                except Exception as e:
+                    print(f"Error extracting 2D pose: {e}")
+                    # 出错时创建空关键点
+                    keypoints = np.zeros((17, 2))
+                    scores = np.zeros(17)
                 
                 # 将关键点格式转换为HRNet格式，方便后续处理和可视化
                 keypoints_array = np.array([keypoints])[np.newaxis, ...]  # [1, 1, 17, 2]
@@ -625,12 +617,18 @@ class PoseEstimator:
                 if self.visualization_mode and not visualization_2d_queue.full():
                     vis_2d = frame.copy()
                     if is_valid_keypoints:
-                        vis_2d = self.create_2d_visualization(frame, keypoints_vis)
+                        try:
+                            vis_2d = self.create_2d_visualization(frame, keypoints_vis)
+                        except Exception as e:
+                            print(f"Error creating 2D visualization: {e}")
+                            # 显示错误信息在原始帧上
+                            error_text = f"Visualization Error: {str(e)}"
+                            cv2.putText(vis_2d, error_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     else:
                         # 没有检测到人，只显示原始帧和状态信息
-                        fps_text = f"System Frame Rate: {1.0/self.frame_time:.1f} FPS"
-                        yolo_text = f"YOLO Processing: {1.0/self.yolo_time:.1f} FPS"
-                        status_text = "状态: 未检测到人体"
+                        fps_text = f"System Frame Rate: {1.0/max(0.001, self.frame_time):.1f} FPS"
+                        yolo_text = f"YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS"
+                        status_text = "Status: No Person Detected"
                         cv2.putText(vis_2d, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(vis_2d, yolo_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(vis_2d, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -643,14 +641,16 @@ class PoseEstimator:
                     self.all_scores.append(scores)
                     
             except Exception as e:
-                print(f"2D姿态提取线程出错: {e}")
+                print(f"Error in 2D pose extraction thread: {e}")
                 import traceback
                 traceback.print_exc()
+                # 添加短暂休眠，避免错误发生时CPU使用率过高
+                time.sleep(0.1)
                 
     def predict_3d_pose_thread(self):
         """3D姿态预测线程"""
         buffer_keypoints = []
-        update_interval = max(0.05, 1.0 / (self.args.min_3d_update_fps * 2.5))  # 大幅减小更新间隔，提高刷新率
+        update_interval = 0.02  # 固定的更新间隔，约50FPS
         last_update = time.time()
         render_time = 0.0  # 用于记录渲染时间
         
@@ -763,183 +763,176 @@ class PoseEstimator:
                             
                         # 创建一个显示"未检测到人体"的空白3D可视化
                         blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                        status_text = "状态: 未检测到人体"
+                        status_text = "Status: No Person Detected"
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        fps_text = f"3D渲染: {1.0/max(0.001, render_time):.1f} FPS"
-                        avg_fps_text = f"平均更新率: {np.mean(fps_history) if fps_history else 0:.1f} FPS"
+                        fps_text = f"3D Rendering: {1.0/max(0.001, render_time):.1f} FPS"
+                        avg_fps_text = f"Average Update Rate: {np.mean(fps_history) if fps_history else 0:.1f} FPS"
                         cv2.putText(blank_3d, fps_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(blank_3d, avg_fps_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         
                         visualization_3d_queue.put(blank_3d)
                 
             except Exception as e:
-                print(f"3D姿态预测线程出错: {e}")
+                print(f"Error in 3D pose prediction thread: {e}")
                 import traceback
                 traceback.print_exc()
                 
     def process_fixed_window_thread(self):
-        """固定窗口批量处理线程，负责收集帧并按照固定窗口进行处理"""
-        print("固定窗口处理线程已启动")
-        
+        """固定窗口批量处理线程"""
         while not stop_event.is_set():
             try:
-                # 关闭检查 - 如果收到关闭信号且处理完所有帧，则退出
-                if self.is_shutting_down and len(self.current_window_keypoints) == 0:
-                    print("已处理完所有窗口，线程退出")
-                    break
-                
-                # 收集阶段 - 收集足够的关键点形成一个完整窗口
-                if len(self.current_window_keypoints) < self.window_size and not self.window_processing:
+                # 收集关键点直到达到窗口大小
+                while len(self.current_window_keypoints) < self.window_size and not stop_event.is_set():
                     if keypoints_queue.empty():
                         time.sleep(0.01)
                         continue
-                    
+                        
                     frame, keypoints, scores = keypoints_queue.get()
                     
-                    # 检查关键点是否有效
+                    # 检查关键点是否有效（所有值都非零）
                     is_valid_keypoints = not np.all(keypoints == 0)
                     
-                    # 只添加有效的关键点
+                    # 只添加有效的关键点到窗口
                     if is_valid_keypoints:
                         self.current_window_frames.append(frame)
                         self.current_window_keypoints.append(keypoints)
                         self.current_window_scores.append(scores)
+                        self.warmup_frames_collected += 1
                         
-                        # 更新预热进度
-                        if not self.warmup_completed:
-                            self.warmup_frames_collected = len(self.current_window_keypoints)
-                            
-                        # 在可视化模式下创建2D姿态图
+                        # 可视化当前收集阶段的2D姿态
                         if self.visualization_mode and not visualization_2d_queue.full():
-                            # 转换关键点到HRNet格式
+                            # 创建收集状态可视化
+                            vis_frame = frame.copy()
                             keypoints_array = np.array([keypoints])[np.newaxis, ...]
-                            keypoints_converted = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
-                            keypoints_vis = keypoints_converted[0, 0]
+                            keypoints_vis = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())[0, 0]
                             
-                            # 创建2D可视化
-                            vis_2d = self.create_2d_visualization(frame, keypoints_vis)
+                            # 绘制骨架
+                            try:
+                                vis_frame = self.create_2d_visualization(frame, keypoints_vis)
+                            except Exception as e:
+                                print(f"Error creating 2D visualization: {e}")
+                                error_text = f"Visualization Error: {str(e)}"
+                                cv2.putText(vis_frame, error_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             # 添加收集状态信息
+                            status_text = f"Collecting Frames: {len(self.current_window_keypoints)}/{self.window_size}"
+                            cv2.putText(vis_frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                            
+                            # 显示预热状态
                             if not self.warmup_completed:
-                                status_text = f"系统预热中: {len(self.current_window_keypoints)}/{self.window_size} 帧"
-                                progress = int(len(self.current_window_keypoints) / self.window_size * 100)
-                                cv2.putText(vis_2d, status_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                                # 绘制进度条
-                                cv2.rectangle(vis_2d, (10, 150), (10 + int(progress * 2), 170), (0, 255, 0), -1)
-                                cv2.rectangle(vis_2d, (10, 150), (210, 170), (0, 0, 0), 1)
-                            else:
-                                window_text = f"收集窗口 #{self.window_count + 1}: {len(self.current_window_keypoints)}/{self.window_size} 帧"
-                                cv2.putText(vis_2d, window_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                warmup_text = f"System Warming Up: {self.warmup_frames_collected}/{self.window_size}"
+                                cv2.putText(vis_frame, warmup_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                                 
-                            visualization_2d_queue.put(vis_2d)
-                    
-                # 处理阶段 - 在收集了足够的帧后进行3D姿态预测
-                if len(self.current_window_keypoints) >= self.window_size and not self.window_processing:
-                    print(f"\n开始处理窗口 #{self.window_count + 1} ({self.window_size}帧)")
-                    self.window_processing = True
-                    process_start_time = time.time()
-                    
-                    # 使用当前窗口的关键点进行3D预测
-                    window_keypoints = np.array(self.current_window_keypoints)
-                    window_3d_predictions = []
-                    
-                    # 使用模型处理整个窗口
-                    pose_3d = self.predict_3d_pose(window_keypoints)
-                    
-                    # 记录这个窗口的3D预测结果及相关信息
-                    window_result = {
-                        'window_id': self.window_count,
-                        'frames': self.current_window_frames,
-                        'keypoints': self.current_window_keypoints,
-                        'scores': self.current_window_scores,
-                        'pose_3d': pose_3d,
-                        'start_frame_index': self.total_frames_processed,
-                        'processing_time': time.time() - process_start_time
-                    }
-                    
-                    # 添加到全局结果
-                    self.all_window_predictions.append(window_result)
-                    
-                    # 更新计数和状态
-                    self.window_count += 1
-                    self.total_frames_processed += len(self.current_window_keypoints)
-                    self.window_processing_delay = time.time() - process_start_time
-                    self.last_window_completed_time = time.time()
-                    
-                    # 清空当前窗口，准备收集下一个窗口
-                    self.current_window_frames = []
-                    self.current_window_keypoints = []
-                    self.current_window_scores = []
-                    
-                    # 标记预热完成
-                    if not self.warmup_completed:
-                        self.warmup_completed = True
-                        print("系统预热完成！开始正常处理")
-                    
-                    # 重置处理标志
-                    self.window_processing = False
-                    
-                    print(f"窗口 #{self.window_count} 处理完成，用时 {self.window_processing_delay:.2f} 秒")
+                            visualization_2d_queue.put(vis_frame)
+                    else:
+                        # 检测到无效关键点，在可视化中显示状态
+                        if self.visualization_mode and not visualization_2d_queue.full():
+                            vis_frame = frame.copy()
+                            status_text = "No Person Detected, Waiting for Valid Input..."
+                            cv2.putText(vis_frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            
+                            # 显示当前收集状态
+                            collection_text = f"Frames Collected: {len(self.current_window_keypoints)}/{self.window_size}"
+                            cv2.putText(vis_frame, collection_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
+                            
+                            visualization_2d_queue.put(vis_frame)
+                            
+                    # 如果正在关闭，并且已填充足够的帧，则退出收集循环
+                    if self.is_shutting_down and len(self.current_window_keypoints) == self.window_size:
+                        print("During shutdown, last window filled")
+                        break
                 
-                # 显示处理状态
-                if self.visualization_mode and not visualization_3d_queue.full() and self.warmup_completed:
-                    # 检查是否有处理完成的窗口
-                    if len(self.all_window_predictions) > 0:
-                        # 确定当前应该显示哪个窗口的哪一帧
-                        current_window_index = self.current_display_index // self.window_size
+                # 设置状态为正在处理窗口
+                self.window_processing = True
+                
+                # 只有当收集了足够的帧时才处理
+                if len(self.current_window_keypoints) == self.window_size:
+                    try:
+                        # 记录窗口开始处理时间
+                        window_start_time = time.time()
                         
-                        # 如果索引超出范围，表示显示最后一个窗口的最后一帧
-                        if current_window_index >= len(self.all_window_predictions):
-                            current_window_index = len(self.all_window_predictions) - 1
-                            frame_in_window = self.window_size - 1
-                        else:
-                            frame_in_window = self.current_display_index % self.window_size
+                        # 使用收集的关键点进行3D姿态预测
+                        pose_3d = self.predict_3d_pose(self.current_window_keypoints)
                         
-                        # 获取当前窗口
-                        current_window = self.all_window_predictions[current_window_index]
+                        # 计算窗口处理延迟
+                        self.window_processing_delay = time.time() - window_start_time
+                        
+                        # 创建窗口预测结果
+                        window_result = {
+                            'window_id': self.window_count,
+                            'frames': self.current_window_frames,
+                            'keypoints': self.current_window_keypoints,
+                            'scores': self.current_window_scores,
+                            'pose_3d': pose_3d,
+                            'processing_delay': self.window_processing_delay
+                        }
+                        
+                        # 添加到所有窗口预测结果
+                        self.all_window_predictions.append(window_result)
+                        
+                        # 更新总帧数
+                        self.total_frames_processed += len(self.current_window_keypoints)
                         
                         # 创建3D可视化
-                        if hasattr(current_window, 'cached_vis_3d') and frame_in_window in current_window['cached_vis_3d']:
-                            # 使用缓存的3D可视化
-                            vis_3d = current_window['cached_vis_3d'][frame_in_window]
-                        else:
-                            # 创建新的3D可视化
-                            try:
-                                vis_3d = self.create_3d_visualization_fixed_window(
-                                    current_window['pose_3d'],
-                                    window_id=current_window['window_id'],
-                                    frame_in_window=frame_in_window,
-                                    total_frame_index=current_window['start_frame_index'] + frame_in_window
-                                )
-                                
-                                # 缓存结果
-                                if not hasattr(current_window, 'cached_vis_3d'):
-                                    current_window['cached_vis_3d'] = {}
-                                current_window['cached_vis_3d'][frame_in_window] = vis_3d
-                            except Exception as e:
-                                print(f"创建3D可视化时出错: {e}")
-                                vis_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
+                        if self.visualization_mode and not visualization_3d_queue.full():
+                            # 为每个帧创建可视化，但都使用相同的3D姿态
+                            for i in range(len(self.current_window_frames)):
+                                try:
+                                    vis_3d = self.create_3d_visualization_fixed_window(
+                                        pose_3d, 
+                                        self.window_count,
+                                        i,
+                                        self.total_frames_processed - self.window_size + i
+                                    )
+                                    visualization_3d_queue.put(vis_3d)
+                                except Exception as e:
+                                    print(f"Error creating 3D visualization: {e}")
+                                    # 创建一个错误信息图像
+                                    error_img = np.ones((800, 800, 3), dtype=np.uint8) * 255
+                                    error_text = f"3D Visualization Error: {str(e)}"
+                                    cv2.putText(error_img, error_text, (10, 400), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                    visualization_3d_queue.put(error_img)
                         
-                        # 更新显示索引
-                        self.current_display_index += 1
+                        # 增加窗口计数
+                        self.window_count += 1
                         
-                        # 将3D可视化放入队列
-                        visualization_3d_queue.put(vis_3d)
-                    else:
-                        # 没有可用的窗口结果，显示等待信息
-                        blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                        cv2.putText(blank_3d, "等待第一个窗口处理完成...", (10, 400), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        visualization_3d_queue.put(blank_3d)
-                
-                # 简单帧率控制
-                time.sleep(0.001)
+                        # 设置预热完成标志
+                        if not self.warmup_completed:
+                            self.warmup_completed = True
+                            print(f"\nWarm-up complete! Processed first complete window ({self.window_size} frames).")
+                            print(f"Window processing delay: {self.window_processing_delay:.2f} seconds")
+                        
+                        # 更新最后一个窗口完成时间
+                        self.last_window_completed_time = time.time()
+                        
+                    except Exception as e:
+                        print(f"Error processing window: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    finally:
+                        # 清空当前窗口
+                        self.current_window_frames = []
+                        self.current_window_keypoints = []
+                        self.current_window_scores = []
+                        self.window_processing = False
+                        
+                        # 如果正在关闭，设置关闭标志为False，表示处理完成
+                        if self.is_shutting_down:
+                            print("Last window processing complete, ready to close...")
+                            self.is_shutting_down = False
                 
             except Exception as e:
-                print(f"固定窗口处理线程出错: {e}")
+                print(f"Error in fixed window processing thread: {e}")
                 import traceback
                 traceback.print_exc()
-                
+                # 清空当前窗口，避免卡在错误状态
+                self.current_window_frames = []
+                self.current_window_keypoints = []
+                self.current_window_scores = []
+                self.window_processing = False
+                time.sleep(0.1)  # 添加短暂休眠
+
     def create_3d_visualization_fixed_window(self, pose_3d, window_id, frame_in_window, total_frame_index):
         """
         为固定窗口模式创建3D可视化
@@ -953,25 +946,33 @@ class PoseEstimator:
         返回:
             img: 3D可视化图像
         """
-        # 调用现有的OpenCV渲染函数
-        img = self.create_3d_visualization_opencv(pose_3d)
-        
-        # 添加窗口处理信息
-        delay_text = f"系统延迟: 约 {self.estimated_delay:.1f} 秒"
-        window_text = f"窗口 #{window_id+1}, 帧 {frame_in_window+1}/{self.window_size}"
-        total_text = f"总帧数: {total_frame_index+1}"
-        
-        # 添加半透明背景区域，用于窗口信息
-        overlay = img.copy()
-        cv2.rectangle(overlay, (5, 5), (400, 100), (255, 255, 255), -1)
-        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
-        
-        # 添加信息文本
-        cv2.putText(img, delay_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(img, window_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, total_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 0), 2)
-        
-        return img
+        try:
+            # 调用现有的OpenCV渲染函数
+            img = self.create_3d_visualization_opencv(pose_3d)
+            
+            # 添加窗口处理信息
+            delay_text = f"System Delay: ~{self.estimated_delay:.1f} seconds"
+            window_text = f"Window #{window_id+1}, Frame {frame_in_window+1}/{self.window_size}"
+            total_text = f"Total Frames: {total_frame_index+1}"
+            
+            # 添加半透明背景区域，用于窗口信息
+            overlay = img.copy()
+            cv2.rectangle(overlay, (5, 5), (400, 100), (255, 255, 255), -1)
+            cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+            
+            # 添加信息文本
+            cv2.putText(img, delay_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            cv2.putText(img, window_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(img, total_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 0), 2)
+            
+            return img
+        except Exception as e:
+            print(f"Error creating fixed window 3D visualization: {e}")
+            # 创建一个显示错误信息的空白图像
+            img = np.ones((800, 800, 3), dtype=np.uint8) * 255
+            error_text = f"3D Visualization Error: {str(e)}"
+            cv2.putText(img, error_text, (10, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            return img
 
     def run(self):
         """运行姿态估计pipeline"""
@@ -981,33 +982,23 @@ class PoseEstimator:
         threads = []
         threads.append(threading.Thread(target=self.extract_2d_pose_thread))
         
-        # 选择使用哪种处理模式
-        if self.use_fixed_window:
-            threads.append(threading.Thread(target=self.process_fixed_window_thread))
-            print("使用固定窗口批量处理模式")
-        else:
-            threads.append(threading.Thread(target=self.predict_3d_pose_thread))
-            print("使用滑动窗口连续处理模式")
+        # 使用固定窗口批量处理模式
+        threads.append(threading.Thread(target=self.process_fixed_window_thread))
+        print("Using fixed window batch processing mode")
             
         for thread in threads:
             thread.daemon = True
             thread.start()
             
         try:
-            print("开始实时姿态估计...")
-            print("按 'q' 键退出")
+            print("Starting real-time pose estimation...")
+            print("Press 'q' to exit")
             
-            if self.use_fixed_window:
-                print("\n固定窗口批量处理配置:")
-                print(f"- 窗口大小: {self.window_size} 帧")
-                print(f"- 预计延迟: 约 {self.estimated_delay} 秒")
-                print(f"- 处理方式: 每收集{self.window_size}帧进行一次批量处理")
-                print("- 初次使用需要预热过程，请耐心等待首个窗口处理完成\n")
-            else:
-                print("\n分离的处理线程：")
-                print("- 主循环：负责帧读取与显示")
-                print("- 2D提取线程：运行YOLO模型进行人体检测和关键点提取")
-                print("- 3D预测线程：运行MixSTE模型进行3D姿态重建\n")
+            print("\nFixed Window Batch Processing Configuration:")
+            print(f"- Window Size: {self.window_size} frames")
+            print(f"- Estimated Delay: ~{self.estimated_delay} seconds")
+            print(f"- Processing Method: Batch processing every {self.window_size} frames")
+            print("- First use requires warm-up process, please wait for the first window to complete\n")
 
             # 主循环
             while True:
@@ -1025,7 +1016,7 @@ class PoseEstimator:
                 # 读取帧
                 ret, frame = self.cap.read()
                 if not ret:
-                    print("无法从摄像头读取帧")
+                    print("Cannot read frame from camera")
                     break
                 
                 self.last_frame_time = time.time()
@@ -1054,27 +1045,23 @@ class PoseEstimator:
                 # 显示性能信息
                 fps = 1.0 / max(0.001, self.frame_time)  # 避免除以零
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
-                    if self.use_fixed_window:
-                        print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
-                              f"Window: {self.window_count} | Frames: {self.total_frames_processed}", end="")
-                    else:
-                        print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
-                              f"3D Prediction: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                    print(f"\rDisplay Rate: {fps:.1f} FPS | YOLO: {1.0/max(0.001, self.yolo_time):.1f} FPS | " +
+                          f"Window: {self.window_count} | Frames: {self.total_frames_processed}", end="")
                 
                 # 设置更短的等待时间，提高响应速度
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
-                    print("\n用户请求退出")
+                    print("\nUser requested exit")
                     
-                    # 在固定窗口模式下，需要处理剩余的帧
-                    if self.use_fixed_window and len(self.current_window_keypoints) > 0:
-                        print(f"\n等待处理剩余的 {len(self.current_window_keypoints)} 帧...")
+                    # 处理剩余的帧
+                    if len(self.current_window_keypoints) > 0:
+                        print(f"\nWaiting to process remaining {len(self.current_window_keypoints)} frames...")
                         self.is_shutting_down = True
                         
                         # 如果有部分收集的帧但不足一个窗口，填充剩余帧
                         if 0 < len(self.current_window_keypoints) < self.window_size:
                             frames_needed = self.window_size - len(self.current_window_keypoints)
-                            print(f"填充 {frames_needed} 帧以完成最后一个窗口")
+                            print(f"Filling {frames_needed} frames to complete the last window")
                             
                             # 使用最后一帧的复制来填充
                             last_frame = self.current_window_frames[-1]
@@ -1090,14 +1077,14 @@ class PoseEstimator:
                         wait_start = time.time()
                         while self.is_shutting_down and time.time() - wait_start < 30:  # 最多等待30秒
                             if len(self.current_window_keypoints) == 0:
-                                print("所有窗口处理完成，正在关闭程序...")
+                                print("All windows processed, closing program...")
                                 break
                             time.sleep(0.1)
                     
                     break
                     
         except KeyboardInterrupt:
-            print("\n用户中断程序")
+            print("\nUser interrupted program")
         finally:
             # 停止所有线程
             stop_event.set()
@@ -1115,37 +1102,27 @@ class PoseEstimator:
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='实时姿态估计')
+    parser = argparse.ArgumentParser(description='Real-time Pose Estimation')
     
     # 基本参数
-    parser.add_argument('--camera_id', type=int, default=0, help='摄像头ID')
-    parser.add_argument('--output_dir', type=str, default='./output', help='输出目录')
+    parser.add_argument('--camera_id', type=int, default=0, help='Camera ID')
+    parser.add_argument('--output_dir', type=str, default='./output', help='Output directory')
     
     # 模型参数
-    parser.add_argument('--yolo_model', type=str, default='yolo11n-pose.pt', help='YOLO模型路径')
+    parser.add_argument('--yolo_model', type=str, default='yolo11n-pose.pt', help='YOLO model path')
     parser.add_argument('--mixste_model', type=str, default='checkpoint/pretrained/hot_mixste/model.pth', 
-                       help='MixSTE模型路径')
+                       help='MixSTE model path')
     
     # 可视化参数
-    parser.add_argument('--visualization', action='store_true', help='启用可视化模式')
-    parser.add_argument('--fix_z', action='store_true', help='固定z轴范围')
-    parser.add_argument('--use_opencv_render', action='store_true', help='使用OpenCV进行快速3D渲染')
-    parser.add_argument('--min_3d_update_fps', type=float, default=15.0, 
-                       help='3D姿态更新的最小目标帧率，更新间隔会相应调整')
-    
-    # 性能参数
-    parser.add_argument('--min_frames_to_start', type=int, default=10,
-                       help='开始3D预测所需的最小帧数')
+    parser.add_argument('--visualization', action='store_true', help='Enable visualization mode')
+    parser.add_argument('--fix_z', action='store_true', help='Fix Z-axis range')
+    parser.add_argument('--use_opencv_render', action='store_true', help='Use OpenCV for fast 3D rendering')
     
     # 其他参数
     parser.add_argument('--conf_thresh', type=float, default=0.5, 
-                       help='关键点置信度阈值，低于此值的关键点将使用上一帧的对应关键点')
-    parser.add_argument('--save_results', action='store_true', help='保存结果到文件')
+                       help='Keypoint confidence threshold, keypoints below this value will use the corresponding keypoint from the previous frame')
     parser.add_argument('--video_fps_limit', type=int, default=30,
-                       help='限制处理帧率，避免系统过载，设为0表示不限制')
-    
-    # 固定窗口批量处理相关参数
-    parser.add_argument('--use_fixed_window', action='store_true', help='启用固定窗口批量处理')
+                       help='Limit processing frame rate to avoid system overload, set to 0 for no limit')
     
     return parser.parse_args()
     
@@ -1155,7 +1132,6 @@ def main():
     args = parse_args()
     estimator = PoseEstimator(args)
     estimator.run()
-    
 
 if __name__ == "__main__":
     main() 
