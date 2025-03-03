@@ -47,6 +47,11 @@ class PoseEstimator:
         self.use_opencv_render = args.use_opencv_render  # 使用OpenCV渲染标志
         self.is_video_input = args.video_path is not None
         
+        # 添加线程同步事件
+        self.models_ready = threading.Event()
+        self.threads_ready = threading.Event()  # 新添加：线程准备就绪事件
+        self.first_frame_processed = threading.Event()  # 新添加：第一帧处理完成事件
+        
         # 打印重要的配置信息
         print(f"\n=== System Configuration ===")
         print(f"Device: {self.device}")
@@ -76,10 +81,6 @@ class PoseEstimator:
             if self.visualization_mode:
                 os.makedirs(os.path.join(self.output_dir, 'pose2D'), exist_ok=True)
                 os.makedirs(os.path.join(self.output_dir, 'pose3D'), exist_ok=True)
-        
-        # 初始化模型
-        self._init_yolo_model()
-        self._init_mixste_model()
         
         # 视频/摄像头设置
         self.cap = None
@@ -125,9 +126,10 @@ class PoseEstimator:
         try:
             self.yolo_model = YOLO(self.args.yolo_model)
             print("YOLO model loaded successfully")
+            return True
         except Exception as e:
             print(f"Error loading YOLO model: {e}")
-            sys.exit(1)
+            return False
             
     def _init_mixste_model(self):
         """初始化MixSTE模型"""
@@ -150,9 +152,10 @@ class PoseEstimator:
             # 设置为评估模式
             self.mixste_model.eval()
             print("MixSTE model loaded successfully")
+            return True
         except Exception as e:
             print(f"Error loading MixSTE model: {e}")
-            sys.exit(1)
+            return False
             
     def _get_mixste_args(self):
         """获取MixSTE模型参数"""
@@ -347,9 +350,12 @@ class PoseEstimator:
         cv2.rectangle(overlay, (5, 5), (300, 140), (255, 255, 255), -1)
         cv2.addWeighted(overlay, 0.7, vis_2d, 0.3, 0, vis_2d)
         
-        # 添加性能信息
-        system_fps = f"System FPS: {1.0/self.frame_time:.1f}"
-        yolo_fps = f"YOLO FPS: {1.0/self.yolo_time:.1f}"
+        # 添加性能信息（添加除以0保护）
+        frame_time = max(0.001, self.frame_time)  # 确保不会除以0
+        yolo_time = max(0.001, self.yolo_time)    # 确保不会除以0
+        
+        system_fps = f"System FPS: {1.0/frame_time:.1f}"
+        yolo_fps = f"YOLO FPS: {1.0/yolo_time:.1f}"
         resolution = f"Resolution: {self.frame_width}x{self.frame_height}"
         frame_count = f"Frame Count: {self.frame_counter}"
         
@@ -599,6 +605,9 @@ class PoseEstimator:
         """2D姿态提取线程"""
         last_update = time.time()
         
+        # 新添加：通知主线程该线程已准备就绪
+        self.threads_ready.set()
+        
         while not stop_event.is_set():
             try:
                 if frame_queue.empty():
@@ -606,6 +615,11 @@ class PoseEstimator:
                     continue
                     
                 frame = frame_queue.get()
+                
+                # 更新处理时间
+                current_time = time.time()
+                self.frame_time = current_time - last_update
+                last_update = current_time
                 
                 keypoints, scores = self.extract_2d_pose(frame)
                 
@@ -634,8 +648,8 @@ class PoseEstimator:
                         vis_2d = self.create_2d_visualization(frame, keypoints_vis)
                     else:
                         # 没有检测到人，只显示原始帧和状态信息
-                        fps_text = f"System Frame Rate: {1.0/self.frame_time:.1f} FPS"
-                        yolo_text = f"YOLO Processing: {1.0/self.yolo_time:.1f} FPS"
+                        fps_text = f"System Frame Rate: {1.0/max(0.001, self.frame_time):.1f} FPS"
+                        yolo_text = f"YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS"
                         status_text = "Status: No Person Detected"
                         cv2.putText(vis_2d, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(vis_2d, yolo_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -643,11 +657,15 @@ class PoseEstimator:
                         
                     visualization_2d_queue.put(vis_2d)
                     
+                    # 新添加：通知主线程第一帧已处理完成
+                    if not self.first_frame_processed.is_set():
+                        self.first_frame_processed.set()
+                    
                 # 记录关键点用于保存
                 if self.save_results:
                     self.all_keypoints.append(keypoints)
                     self.all_scores.append(scores)
-                    
+
             except Exception as e:
                 print(f"2D Pose Extraction Thread Error: {e}")
                 import traceback
@@ -909,10 +927,40 @@ class PoseEstimator:
                       f"总帧数: {len(all_3d_sequences) * 243}")
                 print(f"3D姿态数据已保存到: {output_3d_path}")
 
+    def initialize_models(self):
+        """初始化所有模型并等待它们准备就绪"""
+        print("\n=== 正在初始化模型 ===")
+        
+        # 初始化YOLO模型
+        if not self._init_yolo_model():
+            return False
+            
+        # 初始化MixSTE模型
+        if not self._init_mixste_model():
+            return False
+            
+        print("\n所有模型初始化完成！")
+        self.models_ready.set()
+        return True
+
     def run(self):
         """运行姿态估计pipeline"""
+        # 首先初始化模型
+        if not self.initialize_models():
+            print("模型初始化失败，程序退出")
+            return
+            
+        # 等待模型准备就绪
+        print("\n等待模型准备就绪...")
+        self.models_ready.wait()
+        
+        # 设置视频源
         self.setup_camera()
         
+        # 如果是视频输入，将视频指针重置到开始位置
+        if self.is_video_input:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            
         # 启动工作线程
         threads = []
         threads.append(threading.Thread(target=self.extract_2d_pose_thread))
@@ -921,6 +969,10 @@ class PoseEstimator:
         for thread in threads:
             thread.daemon = True
             thread.start()
+            
+        # 新添加：等待所有线程准备就绪
+        print("\n等待处理线程准备就绪...")
+        self.threads_ready.wait()
             
         try:
             print("\nStarting real-time pose estimation...")
@@ -934,6 +986,7 @@ class PoseEstimator:
             paused = False
             frame_time = 1.0 / self.fps_limit if self.fps_limit > 0 else 1.0 / 30.0
             next_frame_time = time.time()
+            frames_buffer = []  # 新添加：用于缓存前面的帧
 
             # 进度条（仅用于视频文件）
             if self.is_video_input:
@@ -954,10 +1007,10 @@ class PoseEstimator:
                         print("\nPlayback paused")
                     else:
                         print("\nResuming playback")
-                        next_frame_time = current_time  # 重置帧时间
+                        next_frame_time = current_time
                 
                 if paused:
-                    time.sleep(0.1)  # 暂停时减少CPU使用
+                    time.sleep(0.1)
                     continue
                 
                 # 帧率控制
@@ -980,9 +1033,17 @@ class PoseEstimator:
                 if self.is_video_input:
                     pbar.update(1)
                     
-                # 添加到帧队列
-                if not frame_queue.full():
+                # 如果是第一帧，等待2D检测线程准备就绪
+                if self.frame_counter == 1:
+                    print("\n等待第一帧处理完成...")
+                    frames_buffer.append(frame)
                     frame_queue.put(frame)
+                    self.first_frame_processed.wait()
+                    print("第一帧处理完成，开始正常播放...")
+                else:
+                    # 添加到帧队列
+                    if not frame_queue.full():
+                        frame_queue.put(frame)
                     
                 # 计算下一帧的目标时间
                 next_frame_time = current_time + frame_time
