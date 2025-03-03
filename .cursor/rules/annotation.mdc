@@ -1,0 +1,11 @@
+---
+description: 规范代码注释要求
+globs: *.py
+alwaysApply: false
+---
+
+# Annotaion rules
+
+- 使用中文注释
+- 只对必要且关键的代码进行注释,避免滥用注释
+- 程序UI窗口中的信息类注释使用英文防止乱码
