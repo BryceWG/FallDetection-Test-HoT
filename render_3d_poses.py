@@ -1,3 +1,4 @@
+# python render_3d_poses.py --npz demo\output\sample_video\output_3D\output_keypoints_3d.npz
 import os
 import cv2
 import glob

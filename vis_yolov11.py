@@ -1,3 +1,4 @@
+# python vis_yolov11.py --video sample_video.mp4 --yolo_model yolo11m-pose.pt
 import os
 import sys
 import cv2
@@ -11,7 +12,6 @@ from ultralytics import YOLO
 import warnings
 import matplotlib
 import matplotlib.pyplot as plt 
-import matplotlib.gridspec as gridspec
 plt.switch_backend('agg')
 warnings.filterwarnings('ignore')
 matplotlib.rcParams['pdf.fonttype'] = 42
@@ -22,11 +22,9 @@ from common.utils import *
 from model.mixste.hot_mixste import Model
 
 # 导入自定义模块
-from data_processor import normalize_screen_coordinates, convert_yolov11_to_hrnet_keypoints, convert_yolov11_to_hrnet_scores, camera_to_world
-from utils import show2Dpose, show3Dpose, img2video, showimage, save_debug_images, create_visualization
+from data_processor import normalize_screen_coordinates, convert_yolov11_to_hrnet_keypoints, convert_yolov11_to_hrnet_scores
 
-
-def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thresh=0.5):
+def get_pose2D_yolov11(video_path, output_dir, model_path, conf_thresh=0.5):
     """
     使用YOLO v11 Pose模型从视频中提取2D姿态
     
@@ -34,16 +32,30 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
         video_path: 视频路径
         output_dir: 输出目录
         model_path: YOLO模型路径
-        debug: 是否保存转换前后的关键点对比图
         conf_thresh: 关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点
     """
+    # 检查视频文件是否存在
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"视频文件不存在: {video_path}")
+        
+    # 检查模型文件是否存在
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"YOLO模型文件不存在: {model_path}")
+    
     # 加载YOLO v11 Pose模型
-    model = YOLO(model_path)
+    try:
+        model = YOLO(model_path)
+    except Exception as e:
+        raise Exception(f"加载YOLO模型失败: {str(e)}")
     
     cap = cv2.VideoCapture(video_path)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    if not cap.isOpened():
+        raise Exception(f"无法打开视频文件: {video_path}")
+        
     video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    if video_length == 0:
+        raise Exception("视频文件为空")
     
     print('\n使用YOLO v11 Pose生成2D姿态...')
     
@@ -52,16 +64,26 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
     all_scores = []
     
     # 处理每一帧
+    frames_processed = 0
+    frames_with_detection = 0
+    
     for i in tqdm(range(video_length)):
         ret, frame = cap.read()
         if not ret:
             break
             
+        frames_processed += 1
+            
         # 使用YOLO v11 Pose进行检测
-        results = model(frame)
+        try:
+            results = model(frame)
+        except Exception as e:
+            print(f"第 {i} 帧处理失败: {str(e)}")
+            continue
         
         # 检查是否检测到人体
-        if len(results) > 0 and results[0].keypoints is not None:
+        if len(results) > 0 and results[0].keypoints is not None and len(results[0].keypoints.data) > 0:
+            frames_with_detection += 1
             # 获取第一个检测到的人的关键点
             keypoints = results[0].keypoints.data[0].cpu().numpy()  # [17, 3] 数组，每行是[x, y, conf]
             
@@ -89,16 +111,18 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
     
     cap.release()
     
+    # 检查是否有足够的有效检测
+    if frames_with_detection == 0:
+        raise Exception("视频中未检测到任何人体姿态，请确保视频中有清晰可见的人物")
+    
+    print(f"\n处理了 {frames_processed} 帧，其中 {frames_with_detection} 帧成功检测到人体姿态")
+    
+    if frames_with_detection < frames_processed * 0.1:  # 如果少于10%的帧检测到人体
+        print("警告：大部分帧都未能检测到人体姿态，这可能会影响结果质量")
+    
     # 转换为需要的格式 [1, T, 17, 2] 和 [1, T, 17]
     keypoints_array = np.array(all_keypoints)[np.newaxis, ...]  # [1, T, 17, 2]
     scores_array = np.array(all_scores)[np.newaxis, ...]  # [1, T, 17]
-    
-    # 保存转换前的关键点可视化(如果debug=True)
-    if debug:
-        # 将YOLOv11 Pose的关键点转换为HRNet格式
-        converted_keypoints = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
-        # 保存调试图像
-        save_debug_images(video_path, output_dir, all_keypoints, converted_keypoints)
     
     # 将YOLOv11 Pose的关键点转换为HRNet格式
     keypoints_array = convert_yolov11_to_hrnet_keypoints(keypoints_array.copy())
@@ -115,7 +139,7 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, debug=False, conf_thr
     return keypoints_array, scores_array
 
 
-def get_pose3D(video_path, output_dir, fix_z, fast_mode=False):
+def get_pose3D(video_path, output_dir, fix_z):
     """
     从2D姿态生成3D姿态
     
@@ -123,7 +147,6 @@ def get_pose3D(video_path, output_dir, fix_z, fast_mode=False):
         video_path: 视频路径
         output_dir: 输出目录
         fix_z: 是否固定z轴范围
-        fast_mode: 快速模式，只进行3D姿态预测，不生成可视化结果
     """
     args, _ = argparse.ArgumentParser().parse_known_args()
     args.layers, args.channel, args.d_hid, args.frames = 8, 512, 1024, 243
@@ -156,12 +179,14 @@ def get_pose3D(video_path, output_dir, fix_z, fast_mode=False):
     n_chunks = video_length // args.frames + 1
     offset = (n_chunks * args.frames - video_length) // 2
 
-    ret, img = cap.read()
-    img_size = img.shape
+    ret, frame = cap.read()
+    if not ret:
+        raise Exception("无法读取视频第一帧")
+    img_size = frame.shape
 
     ## 生成3D姿态
     print('\n生成3D姿态...')
-    frame_sum = 0
+
     for i in tqdm(range(n_chunks)):
 
         ## 输入帧
@@ -222,90 +247,36 @@ def get_pose3D(video_path, output_dir, fix_z, fast_mode=False):
         else:
             output_3d_all = np.concatenate([output_3d_all, post_out], axis = 0)
 
-        # 如果不是快速模式，则进行可视化
-        if not fast_mode:
-            ## 坐标系转换
-            # h36m_cameras_extrinsic_params in common/camera.py
-            # https://github.com/facebookresearch/VideoPose3D/blob/main/common/custom_dataset.py#L23
-            rot =  [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
-            rot = np.array(rot, dtype='float32')
-            post_out = camera_to_world(post_out, R=rot, t=0)
-
-            ## 生成2D和3D可视化
-            for j in range(low_index, high_index):
-                jj = j - frame_sum
-                if i == 0 and j == 0:
-                    pass
-                else:
-                    ret, img = cap.read()
-                    img_size = img.shape
-
-                # 2D姿态可视化
-                image = show2Dpose(input_2D_no[jj], copy.deepcopy(img))
-
-                output_dir_2D = output_dir +'pose2D/'
-                os.makedirs(output_dir_2D, exist_ok=True)
-                cv2.imwrite(output_dir_2D + str(('%04d'% j)) + '_2D.png', image)
-
-                # 3D姿态可视化
-                fig = plt.figure(figsize=(9.6, 5.4))
-                gs = gridspec.GridSpec(1, 1)
-                gs.update(wspace=-0.00, hspace=0.05) 
-                ax = plt.subplot(gs[0], projection='3d')
-
-                post_out[jj, :, 2] -= np.min(post_out[jj, :, 2])
-                show3Dpose(post_out[jj], ax, fix_z)
-
-                output_dir_3D = output_dir +'pose3D/'
-                os.makedirs(output_dir_3D, exist_ok=True)
-                plt.savefig(output_dir_3D + str(('%04d'% j)) + '_3D.png', dpi=200, format='png', bbox_inches = 'tight')
-                plt.close()
-
-        frame_sum = high_index
-    
     ## 保存3D关键点
     os.makedirs(output_dir + 'output_3D/', exist_ok=True)
     output_npz = output_dir + 'output_3D/' + 'output_keypoints_3d.npz'
     np.savez_compressed(output_npz, reconstruction=output_3d_all)
 
     print('生成3D姿态成功!')
-    
-    # 如果不是快速模式，创建最终可视化
-    if not fast_mode:
-        create_visualization(output_dir)
-
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--video', type=str, default='sample_video.mp4', help='输入视频')
-    parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--fix_z', action='store_true', help='固定z轴')
-    parser.add_argument('--yolo_model', type=str, default='yolo11n-pose.pt', help='YOLO v11 Pose模型路径')
-    parser.add_argument('--debug', action='store_true', help='保存转换前后的关键点对比图')
+    parser.add_argument('--yolo_model', type=str, default='yolo11m-pose.pt', help='YOLO v11 Pose模型路径')
     parser.add_argument('--conf_thresh', type=float, default=0.5, help='关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点')
-    parser.add_argument('--fast_mode', action='store_true', help='快速模式，只进行3D姿态预测，不生成可视化结果')
 
     args = parser.parse_args()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-
-    video_path = './demo/video/' + args.video
-    video_name = video_path.split('/')[-1].split('.')[0]
-    output_dir = './demo/output/' + video_name + '/'
+    video_path = args.video
+    if not video_path.startswith(('/', './', '../')):  # 如果不是绝对路径或相对路径
+        video_path = os.path.join('./demo/video', video_path)  # 添加默认路径
+        
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    output_dir = os.path.join('./demo/output', video_name + '/')
     
     # 使用YOLO v11 Pose模型获取2D姿态
-    get_pose2D_yolov11(video_path, output_dir, args.yolo_model, args.debug, args.conf_thresh)
+    get_pose2D_yolov11(video_path, output_dir, args.yolo_model, args.conf_thresh)
     
     # 使用现有的3D姿态重建模型
-    get_pose3D(video_path, output_dir, args.fix_z, args.fast_mode)
+    get_pose3D(video_path, output_dir, args.fix_z)
     
-    # 如果不是快速模式，生成视频
-    if not args.fast_mode:
-        img2video(video_path, output_dir)
-        print('生成演示成功!')
-    else:
-        print('快速模式完成：3D姿态数据已保存到', output_dir + 'output_3D/output_keypoints_3d.npz')
-
+    print('3D姿态数据已保存到', output_dir + 'output_3D/output_keypoints_3d.npz')
 
 if __name__ == "__main__":
     main() 
