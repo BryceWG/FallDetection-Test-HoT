@@ -614,7 +614,7 @@ class PoseEstimator:
                     time.sleep(0.01)
                     continue
                     
-                frame = frame_queue.get()
+                frame, processing_complete = frame_queue.get()  # 修改：获取事件对象
                 
                 # 更新处理时间
                 current_time = time.time()
@@ -665,6 +665,9 @@ class PoseEstimator:
                 if self.save_results:
                     self.all_keypoints.append(keypoints)
                     self.all_scores.append(scores)
+                    
+                # 通知主线程当前帧处理完成
+                processing_complete.set()
 
             except Exception as e:
                 print(f"2D Pose Extraction Thread Error: {e}")
@@ -982,20 +985,17 @@ class PoseEstimator:
             print("- 2D thread: YOLO model for human detection and keypoint extraction")
             print("- 3D thread: MixSTE model for 3D pose reconstruction\n")
 
-            # 视频播放控制
+            # 视频播放控制变量
             paused = False
-            frame_time = 1.0 / self.fps_limit if self.fps_limit > 0 else 1.0 / 30.0
-            next_frame_time = time.time()
-            frames_buffer = []  # 新添加：用于缓存前面的帧
-
+            processing_complete = threading.Event()  # 新增：用于等待当前帧处理完成
+            current_time = time.time()  # 添加：初始化当前时间
+            
             # 进度条（仅用于视频文件）
             if self.is_video_input:
                 pbar = tqdm(total=self.frame_count, desc="Video Progress", unit="frames")
-
+                
             # 主循环
             while True:
-                current_time = time.time()
-                
                 # 处理键盘输入
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
@@ -1007,14 +1007,9 @@ class PoseEstimator:
                         print("\nPlayback paused")
                     else:
                         print("\nResuming playback")
-                        next_frame_time = current_time
                 
                 if paused:
                     time.sleep(0.1)
-                    continue
-                
-                # 帧率控制
-                if current_time < next_frame_time:
                     continue
                 
                 # 读取帧
@@ -1026,28 +1021,31 @@ class PoseEstimator:
                         print("\nCannot read frame from camera")
                     break
                 
-                self.last_frame_time = current_time
+                # 更新当前时间
+                current_time = time.time()
+                
                 self.frame_counter += 1
                 
                 # 更新进度条
                 if self.is_video_input:
                     pbar.update(1)
                     
+                # 重置处理完成事件
+                processing_complete.clear()
+                
                 # 如果是第一帧，等待2D检测线程准备就绪
                 if self.frame_counter == 1:
                     print("\n等待第一帧处理完成...")
-                    frames_buffer.append(frame)
-                    frame_queue.put(frame)
+                    frame_queue.put((frame, processing_complete))  # 修改：传入事件对象
                     self.first_frame_processed.wait()
                     print("第一帧处理完成，开始正常播放...")
                 else:
-                    # 添加到帧队列
+                    # 添加到帧队列并等待处理完成
                     if not frame_queue.full():
-                        frame_queue.put(frame)
+                        frame_queue.put((frame, processing_complete))
+                        # 等待当前帧处理完成
+                        processing_complete.wait()
                     
-                # 计算下一帧的目标时间
-                next_frame_time = current_time + frame_time
-                
                 # 显示原始画面
                 cv2.imshow("Input Feed", frame)
                 
