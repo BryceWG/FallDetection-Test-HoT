@@ -92,6 +92,8 @@ class PoseEstimator:
         self.mixste_time = 0
         self.frame_time = 0
         self.last_frame_time = time.time()
+        self.last_sequence_end_time = time.time()
+        self.last_sequence_prediction_time = 0  # 添加新变量存储最新的序列处理时间
         
         # 设置3D可视化参数
         if self.visualization_mode:
@@ -178,11 +180,16 @@ class PoseEstimator:
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.source_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.is_camera_fps = self.source_fps > 0  # 标记是否使用摄像头报告的帧率
+        
+        # 如果无法获取摄像头帧率，设置默认值
+        if not self.is_camera_fps:
+            self.source_fps = 30.0  # 默认30fps
+            print(f"警告: 无法从摄像头获取帧率，使用默认值 {self.source_fps} FPS")
         
         print(f"摄像头初始化完成:")
         print(f"- 分辨率: {self.frame_width}x{self.frame_height}")
-        if self.source_fps > 0:
-            print(f"- 支持帧率: {self.source_fps} FPS")
+        print(f"- 输入帧率: {self.source_fps} FPS {'(摄像头报告)' if self.is_camera_fps else '(默认值)'}")
         print(f"- 输出帧率: {self.fps_limit} FPS")
         
     def release_resources(self):
@@ -324,20 +331,14 @@ class PoseEstimator:
         cv2.rectangle(overlay, (5, 5), (300, 140), (255, 255, 255), -1)
         cv2.addWeighted(overlay, 0.7, vis_2d, 0.3, 0, vis_2d)
         
-        # 添加性能信息（添加除以0保护）
-        frame_time = max(0.001, self.frame_time)  # 确保不会除以0
-        yolo_time = max(0.001, self.yolo_time)    # 确保不会除以0
-        
-        system_fps = f"System FPS: {1.0/frame_time:.1f}"
-        yolo_fps = f"YOLO FPS: {1.0/yolo_time:.1f}"
+        # 添加性能信息
+        input_fps_text = f"Input Video: {self.source_fps:.1f} FPS"
+        yolo_fps = f"YOLO Process: {1.0/max(0.001, self.yolo_time):.1f} FPS"
         resolution = f"Resolution: {self.frame_width}x{self.frame_height}"
-        frame_count = f"Frame Count: {self.frame_counter}"
         
-        # 绘制文字
-        cv2.putText(vis_2d, system_fps, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(vis_2d, input_fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(vis_2d, yolo_fps, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(vis_2d, resolution, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(vis_2d, frame_count, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         return vis_2d
         
@@ -622,12 +623,21 @@ class PoseEstimator:
                         vis_2d = self.create_2d_visualization(frame, keypoints_vis)
                     else:
                         # 没有检测到人，只显示原始帧和状态信息
-                        fps_text = f"System Frame Rate: {1.0/max(0.001, self.frame_time):.1f} FPS"
-                        yolo_text = f"YOLO Processing: {1.0/max(0.001, self.yolo_time):.1f} FPS"
+                        # 添加半透明背景以提高文字可读性
+                        overlay = vis_2d.copy()
+                        cv2.rectangle(overlay, (5, 5), (300, 140), (255, 255, 255), -1)
+                        cv2.addWeighted(overlay, 0.7, vis_2d, 0.3, 0, vis_2d)
+                        
+                        # 添加性能信息
+                        input_fps_text = f"Input Video: {self.source_fps:.1f} FPS"
+                        yolo_fps = f"YOLO Process: {1.0/max(0.001, self.yolo_time):.1f} FPS"
                         status_text = "Status: No Person Detected"
-                        cv2.putText(vis_2d, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.putText(vis_2d, yolo_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        resolution = f"Resolution: {self.frame_width}x{self.frame_height}"
+                        
+                        cv2.putText(vis_2d, input_fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(vis_2d, yolo_fps, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(vis_2d, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(vis_2d, resolution, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         
                     visualization_2d_queue.put(vis_2d)
                     
@@ -777,10 +787,13 @@ class PoseEstimator:
                                   f"(处理时间: {prediction_time:.2f}秒, "
                                   f"平均: {avg_prediction_time:.2f}秒, "
                                   f"间隔: {sequence_interval:.2f}秒)", end="")
+                            
+                            # 更新最新的序列处理时间
+                            self.last_sequence_prediction_time = prediction_time
                         
                         # 清空缓冲区，准备下一个序列
                         buffer_keypoints = buffer_keypoints[243:]
-                        last_sequence_end_time = time.time()
+                        self.last_sequence_end_time = time.time()
                         sequence_counter += 1
                 
                 # 处理3D可视化更新
@@ -829,7 +842,6 @@ class PoseEstimator:
                         frames_remaining = 243 - len(buffer_keypoints)
                         time_remaining = f"Estimated time remaining: {frames_remaining/30:.1f}s"
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.putText(blank_3d, time_remaining, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     else:
                         if len(buffer_keypoints) > 0:
                             status_text = f"Processing next sequence... ({len(buffer_keypoints)}/243 frames)"
@@ -850,6 +862,21 @@ class PoseEstimator:
                     with visualization_3d_queue.mutex:
                         visualization_3d_queue.queue.clear()
                     visualization_3d_queue.put(blank_3d)
+                
+                # 计算实际帧率
+                self.frame_time = time.time() - current_time
+                
+                # 显示性能信息
+                if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
+                    # 使用最新的序列处理时间
+                    sequence_time_str = f"{self.last_sequence_prediction_time:.2f}秒" if self.last_sequence_prediction_time > 0 else "等待序列完成"
+                    
+                    # 添加帧率来源标识
+                    fps_source = "(摄像头)" if self.is_camera_fps else "(默认)"
+                    
+                    print(f"\r输入帧率: {self.source_fps:.1f} FPS {fps_source} | "
+                          f"YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
+                          f"上一序列处理时间: {sequence_time_str}", end="")
                 
                 # 短暂休眠以减少CPU使用
                 time.sleep(0.001)
@@ -996,33 +1023,41 @@ class PoseEstimator:
                         processing_complete.wait()
                 
                 # 显示原始画面
-                cv2.imshow("输入画面", frame)
+                cv2.imshow("Input Video", frame)
                 
                 # 显示2D可视化结果
                 if self.visualization_mode and not visualization_2d_queue.empty():
                     vis_2d = visualization_2d_queue.get()
-                    cv2.imshow("2D姿态检测", vis_2d)
+                    cv2.imshow("2D Pose Detection", vis_2d)
                 
                 # 显示3D可视化结果
                 if self.visualization_mode:
                     if not visualization_3d_queue.empty():
                         vis_3d = visualization_3d_queue.get()
-                        cv2.imshow("3D姿态重建", vis_3d)
+                        cv2.imshow("3D Pose Reconstruction", vis_3d)
                     elif self.frame_counter % 30 == 0:
                         blank_3d = np.ones((800, 800, 3), dtype=np.uint8) * 255
-                        status_text = "状态: 等待下一个243帧序列..."
+                        status_text = "Status: Waiting for next 243-frame sequence..."
                         cv2.putText(blank_3d, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.imshow("3D姿态重建", blank_3d)
+                        cv2.imshow("3D Pose Reconstruction", blank_3d)
                 
                 # 计算实际帧率
                 self.frame_time = time.time() - current_time
-                actual_fps = 1.0 / max(0.001, self.frame_time)
                 
                 # 显示性能信息
                 if self.frame_counter % 30 == 0:  # 每30帧更新一次控制台输出
-                    print(f"\r显示帧率: {actual_fps:.1f} | "
+                    # 使用最新的序列处理时间
+                    sequence_time_str = f"{self.last_sequence_prediction_time:.2f}秒" if self.last_sequence_prediction_time > 0 else "等待序列完成"
+                    
+                    # 添加帧率来源标识
+                    fps_source = "(摄像头)" if self.is_camera_fps else "(默认)"
+                    
+                    print(f"\r输入帧率: {self.source_fps:.1f} FPS {fps_source} | "
                           f"YOLO处理: {1.0/max(0.001, self.yolo_time):.1f} FPS | "
-                          f"3D预测: {1.0/max(0.001, self.mixste_time):.1f} FPS", end="")
+                          f"上一序列处理时间: {sequence_time_str}", end="")
+                
+                # 短暂休眠以减少CPU使用
+                time.sleep(0.001)
                 
         except KeyboardInterrupt:
             print("\n程序被用户中断")
