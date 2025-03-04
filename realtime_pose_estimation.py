@@ -9,7 +9,6 @@ import numpy as np
 import threading
 import queue
 from datetime import datetime
-from tqdm import tqdm
 from ultralytics import YOLO
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D

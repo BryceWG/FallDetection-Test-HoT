@@ -259,7 +259,7 @@ def main():
     parser.add_argument('--video', type=str, default='sample_video.mp4', help='输入视频')
     parser.add_argument('--fix_z', action='store_true', help='固定z轴')
     parser.add_argument('--yolo_model', type=str, default='yolo11m-pose.pt', help='YOLO v11 Pose模型路径')
-    parser.add_argument('--conf_thresh', type=float, default=0.5, help='关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点')
+    parser.add_argument('--conf_thresh', type=float, default=0, help='关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点')
 
     args = parser.parse_args()
 

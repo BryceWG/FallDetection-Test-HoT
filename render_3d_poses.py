@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.gridspec as gridspec
 from tqdm import tqdm
+import shutil  # 导入shutil模块用于文件操作
 
 # 导入自定义模块
 from utils import show3Dpose, showimage
@@ -122,7 +123,7 @@ def create_video_from_frames(frames_dir, output_video_path, fps=30):
 def main():
     parser = argparse.ArgumentParser(description='3D姿态数据渲染工具')
     parser.add_argument('--npz', type=str, required=True, help='输入的.npz文件路径')
-    parser.add_argument('--output_dir', type=str, default='./demo/render_output/', help='输出目录')
+    parser.add_argument('--output_dir', type=str, default='./demo/render_output/', help='输出根目录')
     parser.add_argument('--fps', type=int, default=30, help='视频帧率')
     parser.add_argument('--fix_z', action='store_true', help='固定z轴范围')
     parser.add_argument('--elev', type=float, default=15, help='视角仰角（度）')
@@ -144,14 +145,29 @@ def main():
         print(f"加载.npz文件时出错: {e}")
         return
     
-    # 创建输出目录
+    # 创建输出根目录
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # 获取输入文件的基本名称（不含扩展名）并创建同名文件夹
+    input_basename = os.path.splitext(os.path.basename(args.npz))[0]
+    output_subdir = os.path.join(args.output_dir, input_basename)
+    os.makedirs(output_subdir, exist_ok=True)
+    
+    # 设置sequence目录路径
+    sequence_dir = os.path.join(output_subdir, "sequence")
+    
+    # 如果sequence目录已存在，先清空它
+    if os.path.exists(sequence_dir):
+        print(f"清空目标文件夹: {sequence_dir}")
+        shutil.rmtree(sequence_dir)
+    
+    # 创建新的sequence目录
+    os.makedirs(sequence_dir, exist_ok=True)
+    
     # 渲染序列并创建视频
-    sequence_dir = os.path.join(args.output_dir, "sequence")
     render_sequence(pose_data, sequence_dir, args.fix_z, (args.elev, args.azim))
     
-    video_path = os.path.join(args.output_dir, "3d_pose_video.mp4")
+    video_path = os.path.join(output_subdir, "3d_pose_video.mp4")
     create_video_from_frames(sequence_dir, video_path, args.fps)
 
 
