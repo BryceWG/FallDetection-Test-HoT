@@ -1,4 +1,4 @@
-# python vis_yolov11.py --video sample_video.mp4 --yolo_model yolo11m-pose.pt
+# python vis_yolov11.py --video sample_video.mp4 --yolo_model yolo11m-pose.pt --stream_buffer
 import os
 import sys
 import cv2
@@ -24,16 +24,8 @@ from model.mixste.hot_mixste import Model
 # 导入自定义模块
 from data_processor import normalize_screen_coordinates, convert_yolov11_to_hrnet_keypoints, convert_yolov11_to_hrnet_scores
 
-def get_pose2D_yolov11(video_path, output_dir, model_path, conf_thresh=0.5):
-    """
-    使用YOLO v11 Pose模型从视频中提取2D姿态
-    
-    参数:
-        video_path: 视频路径
-        output_dir: 输出目录
-        model_path: YOLO模型路径
-        conf_thresh: 关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点
-    """
+def get_pose2D_yolov11(video_path, output_dir, model_path, conf_thresh=0.5, batch_size=4, stream_buffer=False):
+
     # 检查视频文件是否存在
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"视频文件不存在: {video_path}")
@@ -44,7 +36,8 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, conf_thresh=0.5):
     
     # 加载YOLO v11 Pose模型
     try:
-        model = YOLO(model_path)
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model = YOLO(model_path).to(device)
     except Exception as e:
         raise Exception(f"加载YOLO模型失败: {str(e)}")
     
@@ -63,61 +56,97 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, conf_thresh=0.5):
     all_keypoints = []
     all_scores = []
     
-    # 处理每一帧
-    frames_processed = 0
-    frames_with_detection = 0
+    # 设置批处理大小
+    frames_batch = []
+    frame_indices = []  # 记录每个批次中帧的索引
     
-    for i in tqdm(range(video_length)):
-        ret, frame = cap.read()
-        if not ret:
-            break
+    print(f'使用设备: {device}, 批处理大小: {batch_size}, {"启用" if stream_buffer else "禁用"}流缓冲')
+    
+    # 使用tqdm显示处理进度
+    with tqdm(total=video_length) as pbar:
+        # 使用stream=True进行内存优化
+        for frame_idx in range(video_length):
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            frames_batch.append(frame)
+            frame_indices.append(frame_idx)
             
-        frames_processed += 1
-            
-        # 使用YOLO v11 Pose进行检测
-        try:
-            results = model(frame)
-        except Exception as e:
-            print(f"第 {i} 帧处理失败: {str(e)}")
-            continue
-        
-        # 检查是否检测到人体
-        if len(results) > 0 and results[0].keypoints is not None and len(results[0].keypoints.data) > 0:
-            frames_with_detection += 1
-            # 获取第一个检测到的人的关键点
-            keypoints = results[0].keypoints.data[0].cpu().numpy()  # [17, 3] 数组，每行是[x, y, conf]
-            
-            # 分离坐标和置信度
-            kpts_xy = keypoints[:, :2]  # [17, 2]
-            scores = keypoints[:, 2]  # [17]
-            
-            # 应用置信度阈值过滤
-            if len(all_keypoints) > 0:
-                # 对于低置信度的关键点,使用上一帧的对应关键点
-                low_conf_mask = scores < conf_thresh
-                kpts_xy[low_conf_mask] = all_keypoints[-1][low_conf_mask]
-                scores[low_conf_mask] = all_scores[-1][low_conf_mask]
-            
-            all_keypoints.append(kpts_xy)
-            all_scores.append(scores)
-        else:
-            # 如果没有检测到人，使用上一帧的关键点或零填充
-            if len(all_keypoints) > 0:
-                all_keypoints.append(all_keypoints[-1])
-                all_scores.append(all_scores[-1])
-            else:
-                all_keypoints.append(np.zeros((17, 2)))
-                all_scores.append(np.zeros(17))
+            # 当收集到一个批次的帧或到达视频末尾时进行处理
+            if len(frames_batch) == batch_size or frame_idx == video_length - 1:
+                try:
+                    # 使用stream=True进行批处理
+                    results = model(frames_batch, 
+                                 conf=conf_thresh,  # 使用置信度阈值
+                                 stream=True,  # 启用stream模式
+                                 device=device,
+                                 stream_buffer=stream_buffer,  # 控制流缓冲
+                                 verbose=False)  # 关闭冗余输出
+                    
+                    # 处理每一帧的结果
+                    for result, curr_frame_idx in zip(results, frame_indices):
+                        if result.keypoints is not None and len(result.keypoints.data) > 0:
+                            # 获取所有检测到的人的关键点
+                            all_detected_keypoints = result.keypoints.data.cpu().numpy()
+                            
+                            # 如果检测到多个人,选择关键点置信度最高的那个
+                            if len(all_detected_keypoints) > 1:
+                                mean_conf_scores = np.mean(all_detected_keypoints[:, :, 2], axis=1)
+                                best_person_idx = np.argmax(mean_conf_scores)
+                                keypoints = all_detected_keypoints[best_person_idx]
+                            else:
+                                keypoints = all_detected_keypoints[0]
+                            
+                            kpts_xy = keypoints[:, :2]
+                            scores = keypoints[:, 2]
+                            
+                            # 处理低置信度关键点
+                            if len(all_keypoints) > 0:
+                                low_conf_mask = scores < conf_thresh
+                                kpts_xy[low_conf_mask] = all_keypoints[-1][low_conf_mask]
+                                scores[low_conf_mask] = all_scores[-1][low_conf_mask]
+                            
+                            all_keypoints.append(kpts_xy)
+                            all_scores.append(scores)
+                        else:
+                            # 如果没有检测到人，使用上一帧的关键点或零填充
+                            if len(all_keypoints) > 0:
+                                all_keypoints.append(all_keypoints[-1])
+                                all_scores.append(all_scores[-1])
+                            else:
+                                all_keypoints.append(np.zeros((17, 2)))
+                                all_scores.append(np.zeros(17))
+                                
+                except Exception as e:
+                    print(f"\n批处理帧 {frame_indices[0]} 到 {frame_indices[-1]} 失败: {str(e)}")
+                    # 对于失败的批次,填充零数据
+                    for _ in frame_indices:
+                        if len(all_keypoints) > 0:
+                            all_keypoints.append(all_keypoints[-1])
+                            all_scores.append(all_scores[-1])
+                        else:
+                            all_keypoints.append(np.zeros((17, 2)))
+                            all_scores.append(np.zeros(17))
+                
+                # 更新进度条
+                pbar.update(len(frames_batch))
+                
+                # 清空批处理列表
+                frames_batch = []
+                frame_indices = []
     
     cap.release()
     
     # 检查是否有足够的有效检测
+    frames_with_detection = sum(1 for scores in all_scores if np.mean(scores) > 0)
+    
     if frames_with_detection == 0:
         raise Exception("视频中未检测到任何人体姿态，请确保视频中有清晰可见的人物")
     
-    print(f"\n处理了 {frames_processed} 帧，其中 {frames_with_detection} 帧成功检测到人体姿态")
+    print(f"\n处理了 {video_length} 帧，其中 {frames_with_detection} 帧成功检测到人体姿态")
     
-    if frames_with_detection < frames_processed * 0.1:  # 如果少于10%的帧检测到人体
+    if frames_with_detection < video_length * 0.1:  # 如果少于10%的帧检测到人体
         print("警告：大部分帧都未能检测到人体姿态，这可能会影响结果质量")
     
     # 转换为需要的格式 [1, T, 17, 2] 和 [1, T, 17]
@@ -140,14 +169,7 @@ def get_pose2D_yolov11(video_path, output_dir, model_path, conf_thresh=0.5):
 
 
 def get_pose3D(video_path, output_dir, fix_z):
-    """
-    从2D姿态生成3D姿态
-    
-    参数:
-        video_path: 视频路径
-        output_dir: 输出目录
-        fix_z: 是否固定z轴范围
-    """
+
     args, _ = argparse.ArgumentParser().parse_known_args()
     args.layers, args.channel, args.d_hid, args.frames = 8, 512, 1024, 243
     args.token_num, args.layer_index = 81, 3
@@ -260,6 +282,8 @@ def main():
     parser.add_argument('--fix_z', action='store_true', help='固定z轴')
     parser.add_argument('--yolo_model', type=str, default='yolo11m-pose.pt', help='YOLO v11 Pose模型路径')
     parser.add_argument('--conf_thresh', type=float, default=0, help='关键点置信度阈值,低于此值的关键点将使用上一帧的对应关键点')
+    parser.add_argument('--batch_size', type=int, default=6, help='批处理大小,根据显存大小调整,设置为1禁用批处理')
+    parser.add_argument('--stream_buffer', action='store_true', help='是否启用流缓冲,启用后可确保不丢帧,但可能增加延迟')
 
     args = parser.parse_args()
 
@@ -271,7 +295,14 @@ def main():
     output_dir = os.path.join('./demo/output', video_name + '/')
     
     # 使用YOLO v11 Pose模型获取2D姿态
-    get_pose2D_yolov11(video_path, output_dir, args.yolo_model, args.conf_thresh)
+    get_pose2D_yolov11(
+        video_path, 
+        output_dir, 
+        args.yolo_model, 
+        args.conf_thresh,
+        args.batch_size,
+        args.stream_buffer
+    )
     
     # 使用现有的3D姿态重建模型
     get_pose3D(video_path, output_dir, args.fix_z)
