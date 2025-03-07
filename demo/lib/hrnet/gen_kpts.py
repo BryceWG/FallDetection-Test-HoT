@@ -30,30 +30,31 @@ from lib.yolov3.human_detector import yolo_human_det as yolo_det
 from lib.sort.sort import Sort
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Train keypoints network')
-    # general
-    parser.add_argument('--cfg', type=str, default=cfg_dir + 'w48_384x288_adam_lr1e-3.yaml',
-                        help='experiment configure file name')
-    parser.add_argument('opts', nargs=argparse.REMAINDER, default=None,
-                        help="Modify config options using the command-line")
-    parser.add_argument('--modelDir', type=str, default=model_dir + 'pose_hrnet_w48_384x288.pth',
-                        help='The model directory')
-    parser.add_argument('--det-dim', type=int, default=416,
-                        help='The input dimension of the detected image')
-    parser.add_argument('--thred-score', type=float, default=0.30,
-                        help='The threshold of object Confidence')
-    parser.add_argument('-a', '--animation', action='store_true',
-                        help='output animation')
-    parser.add_argument('-np', '--num-person', type=int, default=1,
-                        help='The maximum number of estimated poses')
-    parser.add_argument("-v", "--video", type=str, default='camera',
-                        help="input video file name")
-    parser.add_argument('--gpu', type=str, default='0', help='input video')
-    parser.add_argument('--fix_z', action='store_true', help='fix z axis')
-    args = parser.parse_args()
+def get_default_args():
+    """
+    返回默认参数而不是解析命令行
+    """
+    class Args:
+        def __init__(self):
+            self.cfg = cfg_dir + 'w48_384x288_adam_lr1e-3.yaml'
+            self.modelDir = model_dir + 'pose_hrnet_w48_384x288.pth'
+            self.det_dim = 416
+            self.thred_score = 0.30
+            self.animation = False
+            self.num_person = 1
+            self.video = 'camera'
+            self.gpu = '0'
+            self.fix_z = False
+            self.opts = []
+    
+    return Args()
 
-    return args
+
+def parse_args():
+    """
+    返回默认参数而不是解析命令行
+    """
+    return get_default_args()
 
 
 def reset_config(args):
@@ -87,7 +88,10 @@ def model_load(config):
 
 def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False):
     # Updating configuration
-    args = parse_args()
+    args = get_default_args()
+    args.det_dim = det_dim
+    args.num_person = num_peroson
+    args.video = video
     reset_config(args)
 
     cap = cv2.VideoCapture(video)

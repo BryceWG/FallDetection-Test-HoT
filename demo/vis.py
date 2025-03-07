@@ -28,6 +28,9 @@ from model.mixste.hot_mixste import Model
 
 
 def show2Dpose(kps, img):
+    """
+    在图像上绘制2D人体姿态骨架
+    """
     colors = [(138, 201, 38),
               (25, 130, 196),
               (255, 202, 58)] 
@@ -53,6 +56,9 @@ def show2Dpose(kps, img):
 
 
 def show3Dpose(vals, ax, fix_z):
+    """
+    在3D坐标系中绘制人体姿态骨架
+    """
     ax.view_init(elev=15., azim=70)
 
     colors = [(138/255, 201/255, 38/255),
@@ -95,52 +101,61 @@ def show3Dpose(vals, ax, fix_z):
 
 
 def get_pose2D(video_path, output_dir):
+    """
+    从视频中提取2D人体姿态关键点
+    """
     cap = cv2.VideoCapture(video_path)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    print('\nGenerating 2D pose...')
+    print('\n正在生成2D姿态...')
     with torch.no_grad():
-        # the first frame of the video should be detected a person
+        # 视频的第一帧应该检测到一个人
         keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True)
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
-    print('Generating 2D pose successfully!')
+    print('2D姿态生成成功!')
 
     output_dir += 'input_2D/'
     os.makedirs(output_dir, exist_ok=True)
 
     output_npz = output_dir + 'input_keypoints_2d.npz'
     np.savez_compressed(output_npz, reconstruction=keypoints)
+    
+    return keypoints
 
 
-def img2video(video_path, output_dir):
+def visualize_pose2D(video_path, output_dir, keypoints=None):
+    """
+    可视化2D姿态并保存结果
+    """
+    if keypoints is None:
+        # 如果没有提供关键点,则从保存的文件加载
+        keypoints = np.load(output_dir + 'input_2D/input_keypoints_2d.npz', allow_pickle=True)['reconstruction']
+    
     cap = cv2.VideoCapture(video_path)
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) + 5
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-
-    names = sorted(glob.glob(os.path.join(output_dir + 'pose/', '*.png')))
-    img = cv2.imread(names[0])
-    size = (img.shape[1], img.shape[0])
-
-    videoWrite = cv2.VideoWriter(output_dir + video_name + '.mp4', fourcc, fps, size) 
-
-    for name in names:
-        img = cv2.imread(name)
-        videoWrite.write(img)
-
-    videoWrite.release()
-
-
-def showimage(ax, img):
-    ax.set_xticks([])
-    ax.set_yticks([]) 
-    plt.axis('off')
-    ax.imshow(img)
+    video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    print('\n正在可视化2D姿态...')
+    output_dir_2D = output_dir + 'pose2D/'
+    os.makedirs(output_dir_2D, exist_ok=True)
+    
+    for i in tqdm(range(video_length)):
+        ret, img = cap.read()
+        if not ret:
+            break
+            
+        image = show2Dpose(keypoints[0][i], copy.deepcopy(img))
+        cv2.imwrite(output_dir_2D + str(('%04d'% i)) + '_2D.png', image)
+    
+    print('2D姿态可视化完成!')
+    return output_dir_2D
 
 
 def get_pose3D(video_path, output_dir, fix_z):
+    """
+    从2D姿态预测3D姿态
+    """
     args, _ = argparse.ArgumentParser().parse_known_args()
     args.layers, args.channel, args.d_hid, args.frames = 8, 512, 1024, 243
     args.token_num, args.layer_index = 81, 3
@@ -148,11 +163,11 @@ def get_pose3D(video_path, output_dir, fix_z):
     args.previous_dir = 'checkpoint/pretrained/hot_mixste'
     args.n_joints, args.out_joints = 17, 17
 
-    ## Reload 
+    # 加载模型
     model = Model(args).cuda()
 
     model_dict = model.state_dict()
-    # Put the pretrained model in 'checkpoint/pretrained/hot_mixste'
+    # 预训练模型放在 'checkpoint/pretrained/hot_mixste'
     model_path = sorted(glob.glob(os.path.join(args.previous_dir, '*.pth')))[0]
 
     pre_dict = torch.load(model_path)
@@ -163,7 +178,7 @@ def get_pose3D(video_path, output_dir, fix_z):
 
     model.eval()
 
-    ## input
+    # 加载2D关键点
     keypoints = np.load(output_dir + 'input_2D/input_keypoints_2d.npz', allow_pickle=True)['reconstruction']
 
     cap = cv2.VideoCapture(video_path)
@@ -175,12 +190,13 @@ def get_pose3D(video_path, output_dir, fix_z):
     ret, img = cap.read()
     img_size = img.shape
 
-    ## 3D
-    print('\nGenerating 3D pose...')
+    # 3D姿态预测
+    print('\n正在生成3D姿态...')
     frame_sum = 0
+    output_3d_all = None
+    
     for i in tqdm(range(n_chunks)):
-
-        ## input frames
+        # 输入帧
         start_index = i*args.frames - offset
         end_index = (i+1)*args.frames - offset
 
@@ -210,7 +226,7 @@ def get_pose3D(video_path, output_dir, fix_z):
 
         N = input_2D.size(0)
 
-        ## estimation
+        # 预测
         with torch.no_grad():
             output_3D_non_flip = model(input_2D[:, 0])
             output_3D_flip     = model(input_2D[:, 1])
@@ -238,69 +254,88 @@ def get_pose3D(video_path, output_dir, fix_z):
         else:
             output_3d_all = np.concatenate([output_3d_all, post_out], axis = 0)
 
-        ## h36m_cameras_extrinsic_params in common/camera.py
-        # https://github.com/facebookresearch/VideoPose3D/blob/main/common/custom_dataset.py#L23
-        rot =  [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
+        # 坐标系转换
+        rot = [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
         rot = np.array(rot, dtype='float32')
         post_out = camera_to_world(post_out, R=rot, t=0)
-
-        ## 2D
-        for j in range(low_index, high_index):
-            jj = j - frame_sum
-            if i == 0 and j == 0:
-                pass
-            else:
-                ret, img = cap.read()
-                img_size = img.shape
-
-            image = show2Dpose(input_2D_no[jj], copy.deepcopy(img))
-
-            output_dir_2D = output_dir +'pose2D/'
-            os.makedirs(output_dir_2D, exist_ok=True)
-            cv2.imwrite(output_dir_2D + str(('%04d'% j)) + '_2D.png', image)
-
-            ## 3D
-            fig = plt.figure(figsize=(9.6, 5.4))
-            gs = gridspec.GridSpec(1, 1)
-            gs.update(wspace=-0.00, hspace=0.05) 
-            ax = plt.subplot(gs[0], projection='3d')
-
-            post_out[jj, :, 2] -= np.min(post_out[jj, :, 2])
-            show3Dpose(post_out[jj], ax, fix_z)
-
-            output_dir_3D = output_dir +'pose3D/'
-            os.makedirs(output_dir_3D, exist_ok=True)
-            plt.savefig(output_dir_3D + str(('%04d'% j)) + '_3D.png', dpi=200, format='png', bbox_inches = 'tight')
-
+        
         frame_sum = high_index
     
-    ## save 3D keypoints
+    # 保存3D关键点
     os.makedirs(output_dir + 'output_3D/', exist_ok=True)
     output_npz = output_dir + 'output_3D/' + 'output_keypoints_3d.npz'
     np.savez_compressed(output_npz, reconstruction=output_3d_all)
 
-    print('Generating 3D pose successfully!')
+    print('3D姿态生成成功!')
+    return output_3d_all
 
-    ## all
-    image_dir = 'results/' 
+
+def visualize_pose3D(video_path, output_dir, fix_z, output_3d_all=None):
+    """
+    可视化3D姿态并保存结果
+    """
+    if output_3d_all is None:
+        # 如果没有提供3D关键点,则从保存的文件加载
+        output_3d_all = np.load(output_dir + 'output_3D/output_keypoints_3d.npz', allow_pickle=True)['reconstruction']
+    
+    # 坐标系转换
+    rot = [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
+    rot = np.array(rot, dtype='float32')
+    post_out = camera_to_world(output_3d_all, R=rot, t=0)
+    
+    cap = cv2.VideoCapture(video_path)
+    video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    print('\n正在可视化3D姿态...')
+    output_dir_3D = output_dir + 'pose3D/'
+    os.makedirs(output_dir_3D, exist_ok=True)
+    
+    for i in tqdm(range(min(video_length, len(post_out)))):
+        # 3D可视化
+        fig = plt.figure(figsize=(9.6, 5.4))
+        gs = gridspec.GridSpec(1, 1)
+        gs.update(wspace=-0.00, hspace=0.05) 
+        ax = plt.subplot(gs[0], projection='3d')
+
+        post_out[i, :, 2] -= np.min(post_out[i, :, 2])
+        show3Dpose(post_out[i], ax, fix_z)
+
+        plt.savefig(output_dir_3D + str(('%04d'% i)) + '_3D.png', dpi=200, format='png', bbox_inches = 'tight')
+        plt.close()
+    
+    print('3D姿态可视化完成!')
+    return output_dir_3D
+
+
+def generate_demo(output_dir):
+    """
+    生成最终的演示视频,将2D和3D姿态并排展示
+    """
+    # 获取已生成的2D和3D姿态图像
+    output_dir_2D = output_dir + 'pose2D/'
+    output_dir_3D = output_dir + 'pose3D/'
+    
     image_2d_dir = sorted(glob.glob(os.path.join(output_dir_2D, '*.png')))
     image_3d_dir = sorted(glob.glob(os.path.join(output_dir_3D, '*.png')))
-
-    print('\nGenerating demo...')
-    for i in tqdm(range(len(image_2d_dir))):
+    
+    if not image_2d_dir or not image_3d_dir:
+        print('未找到2D或3D姿态图像,请先生成它们')
+        return
+    
+    print('\n正在生成演示...')
+    for i in tqdm(range(min(len(image_2d_dir), len(image_3d_dir)))):
         image_2d = plt.imread(image_2d_dir[i])
         image_3d = plt.imread(image_3d_dir[i])
 
-        ## crop
+        # 裁剪
         edge = (image_2d.shape[1] - image_2d.shape[0]) // 2 - 1
-        # image_2d = image_2d[:, edge:image_2d.shape[1] - edge]
         edge_1 = 10
         image_2d = image_2d[edge_1:image_2d.shape[0] - edge_1, edge + edge_1:image_2d.shape[1] - edge - edge_1]
 
         edge = 130
         image_3d = image_3d[edge:image_3d.shape[0] - edge, edge:image_3d.shape[1] - edge]
 
-        ## show
+        # 显示
         font_size = 12
         fig = plt.figure(figsize=(9.6, 5.4))
         ax = plt.subplot(121)
@@ -311,29 +346,138 @@ def get_pose3D(video_path, output_dir, fix_z):
         showimage(ax, image_3d)
         ax.set_title("Reconstruction", fontsize = font_size)
 
-        ## save
-        output_dir_pose = output_dir +'pose/'
+        # 保存
+        output_dir_pose = output_dir + 'pose/'
         os.makedirs(output_dir_pose, exist_ok=True)
         plt.savefig(output_dir_pose + str(('%04d'% i)) + '_pose.png', dpi=200, bbox_inches = 'tight')
         plt.close()
+    
+    print('演示生成成功!')
+    return output_dir + 'pose/'
+
+
+def img2video(video_path, output_dir):
+    """
+    将图像序列转换为视频
+    """
+    cap = cv2.VideoCapture(video_path)
+    fps = int(cap.get(cv2.CAP_PROP_FPS)) + 5
+    video_name = video_path.split('/')[-1].split('.')[0]
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+    names = sorted(glob.glob(os.path.join(output_dir + 'pose/', '*.png')))
+    if not names:
+        print('未找到图像序列,请先生成演示')
+        return
+        
+    img = cv2.imread(names[0])
+    size = (img.shape[1], img.shape[0])
+
+    print('\n正在生成视频...')
+    videoWrite = cv2.VideoWriter(output_dir + video_name + '.mp4', fourcc, fps, size) 
+
+    for name in tqdm(names):
+        img = cv2.imread(name)
+        videoWrite.write(img)
+
+    videoWrite.release()
+    print(f'视频生成成功: {output_dir + video_name}.mp4')
+
+
+def showimage(ax, img):
+    """
+    在matplotlib轴上显示图像
+    """
+    ax.set_xticks([])
+    ax.set_yticks([]) 
+    plt.axis('off')
+    ax.imshow(img)
+
+
+def process_args():
+    """
+    处理命令行参数,与HRNet的参数分开处理
+    """
+    parser = argparse.ArgumentParser(description='3D姿态估计演示')
+    parser.add_argument('--video', type=str, default='sample_video.mp4', help='输入视频')
+    parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
+    parser.add_argument('--fix_z', action='store_true', help='固定Z轴')
+    
+    # 添加功能选择参数
+    parser.add_argument('--extract_2d', action='store_true', help='提取2D姿态')
+    parser.add_argument('--predict_3d', action='store_true', help='预测3D姿态')
+    parser.add_argument('--vis_2d', action='store_true', help='可视化2D姿态')
+    parser.add_argument('--vis_3d', action='store_true', help='可视化3D姿态')
+    parser.add_argument('--gen_demo', action='store_true', help='生成演示(2D和3D并排)')
+    parser.add_argument('--gen_video', action='store_true', help='生成视频')
+    parser.add_argument('--all', action='store_true', help='执行所有步骤')
+    
+    # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
+    args, unknown = parser.parse_known_args()
+    return args
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--video', type=str, default='sample_video.mp4', help='input video')
-    parser.add_argument('--gpu', type=str, default='0', help='input video')
-    parser.add_argument('--fix_z', action='store_true', help='fix z axis')
-
-    args = parser.parse_args()
+    # 处理命令行参数
+    args = process_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
     video_path = './demo/video/' + args.video
     video_name = video_path.split('/')[-1].split('.')[0]
     output_dir = './demo/output/' + video_name + '/'
-
-    get_pose2D(video_path, output_dir)
-    get_pose3D(video_path, output_dir, args.fix_z)
-    img2video(video_path, output_dir)
-    print('Generating demo successfully!')
+    
+    # 如果没有选择任何功能,默认执行所有步骤
+    if not (args.extract_2d or args.predict_3d or args.vis_2d or args.vis_3d or args.gen_demo or args.gen_video):
+        args.all = True
+    
+    # 执行所有步骤
+    if args.all:
+        args.extract_2d = args.predict_3d = args.vis_2d = args.vis_3d = args.gen_demo = args.gen_video = True
+    
+    # 提取2D姿态
+    keypoints = None
+    if args.extract_2d:
+        keypoints = get_pose2D(video_path, output_dir)
+    
+    # 可视化2D姿态
+    if args.vis_2d:
+        if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
+            print('未找到2D关键点,请先提取2D姿态')
+        else:
+            visualize_pose2D(video_path, output_dir, keypoints)
+    
+    # 预测3D姿态
+    output_3d_all = None
+    if args.predict_3d:
+        if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
+            print('未找到2D关键点,请先提取2D姿态')
+        else:
+            output_3d_all = get_pose3D(video_path, output_dir, args.fix_z)
+    
+    # 可视化3D姿态
+    if args.vis_3d:
+        if not os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz') and output_3d_all is None:
+            print('未找到3D关键点,请先预测3D姿态')
+        else:
+            visualize_pose3D(video_path, output_dir, args.fix_z, output_3d_all)
+    
+    # 生成演示
+    if args.gen_demo:
+        if not os.path.exists(output_dir + 'pose2D/') or not os.path.exists(output_dir + 'pose3D/'):
+            print('未找到2D或3D姿态图像,请先生成它们')
+        else:
+            generate_demo(output_dir)
+    
+    # 生成视频
+    if args.gen_video:
+        if not os.path.exists(output_dir + 'pose/'):
+            print('未找到演示图像,请先生成演示')
+        else:
+            img2video(video_path, output_dir)
+    
+    if args.all:
+        print('所有步骤执行完成!')
 
 

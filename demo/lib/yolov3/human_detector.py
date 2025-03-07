@@ -52,34 +52,37 @@ def write(x, img, colors):
     return img
 
 
-def arg_parse():
-    """"
-    Parse arguements to the detect module
-
+def get_default_args():
     """
-    parser = argparse.ArgumentParser(description='YOLO v3 Cam Demo')
-    parser.add_argument('--confidence', dest='confidence', type=float, default=0.70,
-                        help='Object Confidence to filter predictions')
-    parser.add_argument('--nms-thresh', dest='nms_thresh', type=float, default=0.4, help='NMS Threshold')
-    parser.add_argument('--reso', dest='reso', default=416, type=int, help='Input resolution of the network. '
-                        'Increase to increase accuracy. Decrease to increase speed. (160, 416)')
-    parser.add_argument('-wf', '--weight-file', type=str, default= 'demo/lib/checkpoint/yolov3.weights', help='The path'
-                        'of model weight file')
-    parser.add_argument('-cf', '--cfg-file', type=str, default=cur_dir + '/cfg/yolov3.cfg', help='weight file')
-    parser.add_argument('-a', '--animation', action='store_true', help='output animation')
-    parser.add_argument('-v', '--video', type=str, default='camera', help='The input video path')
-    parser.add_argument('-i', '--image', type=str, default=cur_dir + '/data/dog-cycle-car.png',
-                        help='The input video path')
-    parser.add_argument('-np', '--num-person', type=int, default=1, help='number of estimated human poses. [1, 2]')
-    parser.add_argument('--gpu', type=str, default='0', help='input video')
-    parser.add_argument('--fix_z', action='store_true', help='fix z axis')
+    返回默认参数而不是解析命令行
+    """
+    class Args:
+        def __init__(self):
+            self.confidence = 0.70
+            self.nms_thresh = 0.4
+            self.reso = 416
+            self.weight_file = 'demo/lib/checkpoint/yolov3.weights'
+            self.cfg_file = cur_dir + '/cfg/yolov3.cfg'
+            self.animation = False
+            self.video = 'camera'
+            self.image = cur_dir + '/data/dog-cycle-car.png'
+            self.num_person = 1
+            self.gpu = '0'
+            self.fix_z = False
     
-    return parser.parse_args()
+    return Args()
+
+
+def arg_parse():
+    """
+    返回默认参数而不是解析命令行
+    """
+    return get_default_args()
 
 
 def load_model(args=None, CUDA=None, inp_dim=416):
     if args is None:
-        args = arg_parse()
+        args = get_default_args()
 
     if CUDA is None:
         CUDA = torch.cuda.is_available()
@@ -104,8 +107,7 @@ def load_model(args=None, CUDA=None, inp_dim=416):
 
 
 def yolo_human_det(img, model=None, reso=416, confidence=0.70):
-    args = arg_parse()
-    # args.reso = reso
+    args = get_default_args()
     inp_dim = reso
     num_classes = 80
 
