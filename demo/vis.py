@@ -26,31 +26,40 @@ from common.utils import *
 from common.camera import *
 from model.mixste.hot_mixste import Model
 
-
 def show2Dpose(kps, img):
     """
     在图像上绘制2D人体姿态骨架
     """
-    colors = [(138, 201, 38),
-              (25, 130, 196),
-              (255, 202, 58)] 
+    # 定义颜色: 绿色(左侧), 黄色(右侧), 蓝色(中线)
+    colors = [(138, 201, 38),    # 绿色 - 左侧
+              (255, 202, 58),    # 黄色 - 右侧
+              (25, 130, 196)]    # 蓝色 - 中线
 
+    # 定义连接关系
     connections = [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5],
                    [5, 6], [0, 7], [7, 8], [8, 9], [9, 10],
                    [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16]]
 
-    LR = [3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+    # 定义左右侧: 0=左侧(绿色), 1=右侧(黄色), 2=中线(蓝色)
+    # 根据人体解剖学正确分配颜色:
+    # 0-1, 1-2, 2-3: 右腿 - 右侧色
+    # 0-4, 4-5, 5-6: 左腿 - 左侧色
+    # 0-7, 7-8, 8-9, 9-10: 脊柱和头部 - 中线色
+    # 8-11, 11-12, 12-13: 左臂 - 左侧色
+    # 8-14, 14-15, 15-16: 右臂 - 右侧色
+    LR = [1, 1, 1, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 1, 1, 1]
 
     thickness = 3
 
+    # 首先绘制连接线
     for j,c in enumerate(connections):
         start = map(int, kps[c[0]])
         end = map(int, kps[c[1]])
         start = list(start)
         end = list(end)
-        cv2.line(img, (start[0], start[1]), (end[0], end[1]), colors[LR[j]-1], thickness)
-        cv2.circle(img, (start[0], start[1]), thickness=-1, color=colors[LR[j]-1], radius=3)
-        cv2.circle(img, (end[0], end[1]), thickness=-1, color=colors[LR[j]-1], radius=3)
+        cv2.line(img, (start[0], start[1]), (end[0], end[1]), colors[LR[j]], thickness)
+        cv2.circle(img, (start[0], start[1]), thickness=-1, color=colors[LR[j]], radius=3)
+        cv2.circle(img, (end[0], end[1]), thickness=-1, color=colors[LR[j]], radius=3)
 
     return img
 
@@ -61,18 +70,30 @@ def show3Dpose(vals, ax, fix_z):
     """
     ax.view_init(elev=15., azim=70)
 
-    colors = [(138/255, 201/255, 38/255),
-            (255/255, 202/255, 58/255),
-            (25/255, 130/255, 196/255)]
+    # 定义颜色: 绿色(左侧), 黄色(右侧), 蓝色(中线)
+    colors = [(138/255, 201/255, 38/255),  # 绿色 - 左侧
+              (255/255, 202/255, 58/255),  # 黄色 - 右侧
+              (25/255, 130/255, 196/255)]  # 蓝色 - 中线
 
     I = np.array( [0, 0, 1, 4, 2, 5, 0, 7,  8,  8, 14, 15, 11, 12, 8,  9])
     J = np.array( [1, 4, 2, 5, 3, 6, 7, 8, 14, 11, 15, 16, 12, 13, 9, 10])
 
-    LR = [3, 3, 3, 3, 3, 3, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1]
+    # 定义左右侧: 0=左侧(绿色), 1=右侧(黄色), 2=中线(蓝色)
+    # 根据人体解剖学正确分配颜色:
+    # 0-1, 0-4: 髋部连接
+    # 1-2, 2-3: 右腿
+    # 4-5, 5-6: 左腿
+    # 0-7, 7-8, 8-9, 9-10: 脊柱和头部
+    # 8-11, 11-12, 12-13: 左臂
+    # 8-14, 14-15, 15-16: 右臂
+    LR = [1, 0, 1, 0, 1, 0, 2, 2, 1, 0, 1, 1, 0, 0, 2, 2]
 
     for i in np.arange( len(I) ):
         x, y, z = [np.array( [vals[I[i], j], vals[J[i], j]] ) for j in range(3)]
-        ax.plot(x, y, z, lw=3, color = colors[LR[i]-1])
+        ax.plot(x, y, z, lw=3, color = colors[LR[i]])
+
+    # 添加关节点标记,使用红色增强可见度
+    ax.scatter(vals[:,0], vals[:,1], vals[:,2], c='red', marker='o', s=50)
 
     RADIUS = 0.72
 
@@ -479,5 +500,3 @@ if __name__ == "__main__":
     
     if args.all:
         print('所有步骤执行完成!')
-
-
