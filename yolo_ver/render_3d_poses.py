@@ -9,33 +9,42 @@ from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.gridspec as gridspec
 from tqdm import tqdm
 import shutil  # 导入shutil模块用于文件操作
+import multiprocessing as mp
+from functools import partial
+import psutil  # 用于获取系统内存信息
 
 # 导入自定义模块
 from utils import show3Dpose, showimage
 from data_processor import camera_to_world
 
+def preprocess_pose_data(pose_data):
+    """
+    预处理姿态数据，提前进行坐标转换
+    """
+    rot = np.array([0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088], dtype='float32')
+    processed_data = np.zeros_like(pose_data)
+    
+    for i in range(pose_data.shape[0]):
+        frame_pose = pose_data[i].copy()
+        frame_pose = camera_to_world(frame_pose, R=rot, t=0)
+        frame_pose[:, 2] -= np.min(frame_pose[:, 2])
+        processed_data[i] = frame_pose
+    
+    return processed_data
 
 def render_single_frame(pose_data, frame_idx, output_path, fix_z=True, view_angles=None):
     """
     渲染单帧3D姿态数据
     
     参数:
-        pose_data: 3D姿态数据，形状为[T, 17, 3]
+        pose_data: 预处理后的3D姿态数据
         frame_idx: 要渲染的帧索引
         output_path: 输出图像路径
         fix_z: 是否固定z轴范围
         view_angles: 视角参数，格式为(elevation, azimuth)
     """
-    # 获取指定帧的姿态数据
-    frame_pose = pose_data[frame_idx].copy()
-    
-    # 坐标系转换
-    rot = [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
-    rot = np.array(rot, dtype='float32')
-    frame_pose = camera_to_world(frame_pose, R=rot, t=0)
-    
-    # 调整z轴
-    frame_pose[:, 2] -= np.min(frame_pose[:, 2])
+    # 获取指定帧的姿态数据（已预处理）
+    frame_pose = pose_data[frame_idx]
     
     # 创建图形
     fig = plt.figure(figsize=(9.6, 5.4))
@@ -55,33 +64,69 @@ def render_single_frame(pose_data, frame_idx, output_path, fix_z=True, view_angl
     
     # 保存图像
     plt.savefig(output_path, dpi=200, format='png', bbox_inches='tight')
-    plt.close()
+    plt.close('all')  # 确保关闭所有图形，释放内存
     
     return True
 
+def get_optimal_process_count():
+    """
+    根据系统资源确定最优进程数
+    """
+    cpu_count = mp.cpu_count()
+    memory = psutil.virtual_memory()
+    
+    # 根据可用内存和CPU核心数确定进程数
+    # 每个进程预估使用500MB内存
+    estimated_memory_per_process = 500 * 1024 * 1024  # 500MB in bytes
+    max_processes_by_memory = int(memory.available * 0.7 / estimated_memory_per_process)
+    
+    # 取CPU核心数和内存限制的最小值，并确保至少有1个进程
+    optimal_count = max(1, min(cpu_count - 1, max_processes_by_memory))
+    return optimal_count
+
+def process_frame(frame_info):
+    """
+    处理单个帧的辅助函数，用于多进程处理
+    """
+    pose_data, frame_idx, output_path, fix_z, view_angles = frame_info
+    try:
+        return render_single_frame(pose_data, frame_idx, output_path, fix_z, view_angles)
+    except Exception as e:
+        print(f"处理帧 {frame_idx} 时出错: {str(e)}")
+        return False
 
 def render_sequence(pose_data, output_dir, fix_z=True, view_angles=None):
     """
-    渲染完整3D姿态数据序列
-    
-    参数:
-        pose_data: 3D姿态数据，形状为[T, 17, 3]
-        output_dir: 输出目录
-        fix_z: 是否固定z轴范围
-        view_angles: 视角参数，格式为(elevation, azimuth)
+    使用多进程渲染完整3D姿态数据序列
     """
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
     
-    # 渲染所有帧
-    print(f"Rendering 3D pose sequence...")
-    for i in tqdm(range(pose_data.shape[0])):
-        output_path = os.path.join(output_dir, f"frame_{i:04d}.png")
-        render_single_frame(pose_data, i, output_path, fix_z, view_angles)
+    # 预处理姿态数据
+    print("预处理姿态数据...")
+    processed_data = preprocess_pose_data(pose_data)
     
-    print(f"已成功渲染 {pose_data.shape[0]} 帧到 {output_dir}")
+    # 准备帧信息列表
+    frame_infos = []
+    for i in range(processed_data.shape[0]):
+        output_path = os.path.join(output_dir, f"frame_{i:04d}.png")
+        frame_infos.append((processed_data, i, output_path, fix_z, view_angles))
+    
+    # 获取最优进程数
+    num_processes = get_optimal_process_count()
+    print(f"使用 {num_processes} 个进程进行并行渲染...")
+    
+    # 分批处理以控制内存使用
+    batch_size = 50  # 每批处理50帧
+    for i in range(0, len(frame_infos), batch_size):
+        batch = frame_infos[i:i + batch_size]
+        with mp.Pool(processes=num_processes) as pool:
+            list(tqdm(pool.imap(process_frame, batch), 
+                     total=len(batch),
+                     desc=f"渲染批次 {i//batch_size + 1}/{len(frame_infos)//batch_size + 1}"))
+    
+    print(f"已成功渲染 {processed_data.shape[0]} 帧到 {output_dir}")
     return True
-
 
 def create_video_from_frames(frames_dir, output_video_path, fps=30):
     """
@@ -118,7 +163,6 @@ def create_video_from_frames(frames_dir, output_video_path, fps=30):
     
     print(f"视频已成功创建：{output_video_path}")
     return True
-
 
 def main():
     parser = argparse.ArgumentParser(description='3D姿态数据渲染工具')
@@ -169,7 +213,6 @@ def main():
     
     video_path = os.path.join(output_subdir, "3d_pose_video.mp4")
     create_video_from_frames(sequence_dir, video_path, args.fps)
-
 
 if __name__ == "__main__":
     main() 
