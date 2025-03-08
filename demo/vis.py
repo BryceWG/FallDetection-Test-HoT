@@ -10,7 +10,6 @@ from tqdm import tqdm
 from lib.preprocess import h36m_coco_format, revise_kpts
 from lib.hrnet.gen_kpts import gen_video_kpts as hrnet_pose
 from IPython import embed
-
 import warnings
 import matplotlib
 import matplotlib.pyplot as plt 
@@ -25,6 +24,7 @@ sys.path.append(os.getcwd())
 from common.utils import *
 from common.camera import *
 from model.mixste.hot_mixste import Model
+import time
 
 def show2Dpose(kps, img):
     """
@@ -490,6 +490,9 @@ if __name__ == "__main__":
     if args.all:
         args.extract_2d = args.predict_3d = args.vis_2d = args.vis_3d = args.gen_demo = args.gen_video = True
     
+    # 开始计时
+    start_time = time.time()
+    
     # 提取2D姿态
     keypoints = None
     if args.extract_2d:
@@ -530,6 +533,12 @@ if __name__ == "__main__":
             print('未找到演示图像,请先生成演示')
         else:
             img2video(video_path, output_dir)
+    
+    # 计算总耗时
+    end_time = time.time()
+    total_time = end_time - start_time
+    minutes, seconds = divmod(total_time, 60)
+    print(f'\n总耗时: {int(minutes)}分{seconds:.2f}秒')
     
     if args.all:
         print('所有步骤执行完成!')
