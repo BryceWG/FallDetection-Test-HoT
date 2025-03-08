@@ -331,6 +331,7 @@ def visualize_pose3D(video_path, output_dir, fix_z, output_3d_all=None):
 def generate_demo(output_dir):
     """
     生成最终的演示视频,将2D和3D姿态并排展示
+    使用OpenCV代替matplotlib以提高速度
     """
     # 获取已生成的2D和3D姿态图像
     output_dir_2D = output_dir + 'pose2D/'
@@ -344,9 +345,17 @@ def generate_demo(output_dir):
         return
     
     print('\n正在生成演示...')
+    output_dir_pose = output_dir + 'pose/'
+    os.makedirs(output_dir_pose, exist_ok=True)
+    
     for i in tqdm(range(min(len(image_2d_dir), len(image_3d_dir)))):
-        image_2d = plt.imread(image_2d_dir[i])
-        image_3d = plt.imread(image_3d_dir[i])
+        # 使用OpenCV读取图像
+        image_2d = cv2.imread(image_2d_dir[i])
+        image_3d = cv2.imread(image_3d_dir[i])
+        
+        # 转换为RGB颜色空间（如果需要）
+        image_2d = cv2.cvtColor(image_2d, cv2.COLOR_BGR2RGB)
+        image_3d = cv2.cvtColor(image_3d, cv2.COLOR_BGR2RGB)
 
         # 裁剪
         edge = (image_2d.shape[1] - image_2d.shape[0]) // 2 - 1
@@ -355,23 +364,47 @@ def generate_demo(output_dir):
 
         edge = 130
         image_3d = image_3d[edge:image_3d.shape[0] - edge, edge:image_3d.shape[1] - edge]
-
-        # 显示
-        font_size = 12
-        fig = plt.figure(figsize=(9.6, 5.4))
-        ax = plt.subplot(121)
-        showimage(ax, image_2d)
-        ax.set_title("Input", fontsize = font_size)
-
-        ax = plt.subplot(122)
-        showimage(ax, image_3d)
-        ax.set_title("Reconstruction", fontsize = font_size)
-
-        # 保存
-        output_dir_pose = output_dir + 'pose/'
-        os.makedirs(output_dir_pose, exist_ok=True)
-        plt.savefig(output_dir_pose + str(('%04d'% i)) + '_pose.png', dpi=200, bbox_inches = 'tight')
-        plt.close()
+        
+        # 调整图像大小以确保两张图片高度相同
+        h1, w1 = image_2d.shape[:2]
+        h2, w2 = image_3d.shape[:2]
+        target_height = max(h1, h2)
+        
+        # 调整图像大小，保持纵横比
+        new_w1 = int(w1 * (target_height / h1))
+        new_w2 = int(w2 * (target_height / h2))
+        
+        image_2d = cv2.resize(image_2d, (new_w1, target_height))
+        image_3d = cv2.resize(image_3d, (new_w2, target_height))
+        
+        # 创建标题
+        title_height = 30
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        font_thickness = 2
+        title_color = (0, 0, 0)  # 黑色
+        
+        # 为图像添加标题空间
+        img_2d_with_title = np.ones((target_height + title_height, new_w1, 3), dtype=np.uint8) * 255
+        img_3d_with_title = np.ones((target_height + title_height, new_w2, 3), dtype=np.uint8) * 255
+        
+        # 添加标题
+        cv2.putText(img_2d_with_title, "Input", (10, title_height - 10), font, font_scale, title_color, font_thickness)
+        cv2.putText(img_3d_with_title, "Reconstruction", (10, title_height - 10), font, font_scale, title_color, font_thickness)
+        
+        # 将图像放入带标题的画布中
+        img_2d_with_title[title_height:, :, :] = image_2d
+        img_3d_with_title[title_height:, :, :] = image_3d
+        
+        # 水平拼接两张图像
+        combined_img = np.hstack((img_2d_with_title, img_3d_with_title))
+        
+        # 转换回BGR颜色空间用于保存
+        combined_img = cv2.cvtColor(combined_img, cv2.COLOR_RGB2BGR)
+        
+        # 保存结果
+        output_path = output_dir_pose + str(('%04d'% i)) + '_pose.png'
+        cv2.imwrite(output_path, combined_img)
     
     print('演示生成成功!')
     return output_dir + 'pose/'
