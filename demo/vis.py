@@ -417,7 +417,7 @@ def img2video(video_path, output_dir):
     使用多线程加速处理
     """
     cap = cv2.VideoCapture(video_path)
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) + 5
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
     video_name = video_path.split('/')[-1].split('.')[0]
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
