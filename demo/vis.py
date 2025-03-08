@@ -25,6 +25,7 @@ from common.utils import *
 from common.camera import *
 from model.mixste.hot_mixste import Model
 import time
+import concurrent.futures
 
 def show2Dpose(kps, img):
     """
@@ -413,6 +414,7 @@ def generate_demo(output_dir):
 def img2video(video_path, output_dir):
     """
     将图像序列转换为视频
+    使用多线程加速处理
     """
     cap = cv2.VideoCapture(video_path)
     fps = int(cap.get(cv2.CAP_PROP_FPS)) + 5
@@ -425,14 +427,40 @@ def img2video(video_path, output_dir):
         print('未找到图像序列,请先生成演示')
         return
         
+    # 读取第一张图片获取尺寸
     img = cv2.imread(names[0])
     size = (img.shape[1], img.shape[0])
 
     print('\n正在生成视频...')
     videoWrite = cv2.VideoWriter(output_dir + video_name + '.mp4', fourcc, fps, size) 
 
-    for name in tqdm(names):
-        img = cv2.imread(name)
+    # 定义一个函数用于读取图像
+    def read_image(name):
+        return cv2.imread(name)
+    
+    # 使用线程池并行读取图像
+    frames = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # 提交所有读取任务并获取future对象
+        future_to_name = {executor.submit(read_image, name): name for name in names}
+        
+        # 使用tqdm显示进度
+        for future in tqdm(concurrent.futures.as_completed(future_to_name), total=len(names), desc="读取图像"):
+            name = future_to_name[future]
+            try:
+                # 获取结果并保存到列表中
+                img = future.result()
+                # 保存图像和对应的索引，以便后续按顺序写入
+                index = names.index(name)
+                frames.append((index, img))
+            except Exception as exc:
+                print(f'{name} 读取失败: {exc}')
+    
+    # 按原始顺序排序帧
+    frames.sort(key=lambda x: x[0])
+    
+    # 写入视频
+    for _, img in tqdm(frames, desc="写入视频"):
         videoWrite.write(img)
 
     videoWrite.release()
