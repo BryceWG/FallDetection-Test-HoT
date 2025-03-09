@@ -122,7 +122,7 @@ def show3Dpose(vals, ax, fix_z):
     ax.tick_params('z', labelleft = False)
 
 
-def get_pose2D(video_path, output_dir):
+def get_pose2D(video_path, output_dir, save_json=False):
     """
     从视频中提取2D人体姿态关键点
     """
@@ -143,6 +143,31 @@ def get_pose2D(video_path, output_dir):
 
     output_npz = output_dir + 'input_keypoints_2d.npz'
     np.savez_compressed(output_npz, reconstruction=keypoints)
+    
+    # 如果需要，将2D姿态数据以JSON格式输出
+    if save_json:
+        json_data = []
+        # 假设keypoints[0]是第一个人的所有帧的关键点
+        for frame_idx, frame_kpts in enumerate(keypoints[0]):
+            # 将关键点和置信度值展平为一个列表 [x1, y1, c1, x2, y2, c2, ..., x17, y17, c17]
+            flattened_keypoints = []
+            for kpt_idx in range(len(frame_kpts)):
+                x, y = frame_kpts[kpt_idx][0], frame_kpts[kpt_idx][1]
+                # 使用scores获取置信度值，如果可用
+                c = scores[0][frame_idx][kpt_idx] if scores is not None else 1.0
+                flattened_keypoints.extend([float(x), float(y), float(c)])
+            
+            # 添加到JSON数据中
+            json_data.append({
+                "idx": 0,  # 目前只有一个人
+                "keypoints": flattened_keypoints
+            })
+        
+        # 保存为JSON文件
+        import json
+        with open(output_dir + 'keypoints_2d.json', 'w') as f:
+            json.dump(json_data, f, indent=2)
+        print('2D姿态JSON数据已保存至:', output_dir + 'keypoints_2d.json')
     
     return keypoints
 
@@ -494,6 +519,7 @@ def process_args():
     parser.add_argument('--gen_demo', action='store_true', help='生成演示(2D和3D并排)')
     parser.add_argument('--gen_video', action='store_true', help='生成视频')
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
+    parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
@@ -524,7 +550,7 @@ if __name__ == "__main__":
     # 提取2D姿态
     keypoints = None
     if args.extract_2d:
-        keypoints = get_pose2D(video_path, output_dir)
+        keypoints = get_pose2D(video_path, output_dir, save_json=getattr(args, '2d_json', False))
     
     # 可视化2D姿态
     if args.vis_2d:

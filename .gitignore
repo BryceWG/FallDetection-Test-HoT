@@ -16,3 +16,4 @@
 *.jsonl
 *.jsonl.gz
 *.jsonl.tar.gz
+.github
