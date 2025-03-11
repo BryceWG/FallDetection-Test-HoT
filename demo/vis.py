@@ -514,6 +514,7 @@ def process_args():
     """
     parser = argparse.ArgumentParser(description='3D姿态估计演示')
     parser.add_argument('--video', type=str, default='sample_video.mp4', help='输入视频')
+    parser.add_argument('--video_dir', type=str, default=None, help='输入视频目录(用于批量处理)')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--fix_z', action='store_true', help='固定Z轴')
     
@@ -533,26 +534,13 @@ def process_args():
     return args
 
 
-if __name__ == "__main__":
-    # 处理命令行参数
-    args = process_args()
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-
-    video_path = './demo/video/' + args.video
-    video_name = video_path.split('/')[-1].split('.')[0]
+def process_single_video(video_path, args, start_time=None):
+    """
+    处理单个视频文件
+    """
+    print(f'\n处理视频: {video_path}')
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_dir = './demo/output/' + video_name + '/'
-    
-    # 如果没有选择任何功能,默认执行所有步骤
-    if not (args.extract_2d or args.predict_3d or args.vis_2d or args.vis_3d or args.gen_demo or args.gen_video):
-        args.all = True
-    
-    # 执行所有步骤
-    if args.all:
-        args.extract_2d = args.predict_3d = args.vis_2d = args.vis_3d = args.gen_demo = args.gen_video = True
-    
-    # 开始计时
-    start_time = time.time()
     
     # 提取2D姿态
     keypoints = None
@@ -594,6 +582,56 @@ if __name__ == "__main__":
             print('未找到演示图像,请先生成演示')
         else:
             img2video(video_path, output_dir)
+    
+    # 显示该视频的处理时间
+    if start_time:
+        current_time = time.time()
+        elapsed_time = current_time - start_time
+        minutes, seconds = divmod(elapsed_time, 60)
+        print(f'视频 {video_name} 处理完成! 耗时: {int(minutes)}分{seconds:.2f}秒')
+
+
+if __name__ == "__main__":
+    # 处理命令行参数
+    args = process_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+    # 如果没有选择任何功能,默认执行所有步骤
+    if not (args.extract_2d or args.predict_3d or args.vis_2d or args.vis_3d or args.gen_demo or args.gen_video):
+        args.all = True
+    
+    # 执行所有步骤
+    if args.all:
+        args.extract_2d = args.predict_3d = args.vis_2d = args.vis_3d = args.gen_demo = args.gen_video = True
+    
+    # 开始计时
+    start_time = time.time()
+
+    # 处理单个视频或批量处理视频
+    if args.video_dir:
+        # 获取视频目录下所有视频文件
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+        video_files = []
+        for ext in video_extensions:
+            video_files.extend(glob.glob(os.path.join('./demo/video/', args.video_dir, f'*{ext}')))
+        
+        if not video_files:
+            print(f'错误: 在目录 {args.video_dir} 中未找到视频文件')
+            sys.exit(1)
+        
+        # 显示找到的视频文件
+        print(f'找到 {len(video_files)} 个视频文件:')
+        for video_file in video_files:
+            print(f'- {os.path.basename(video_file)}')
+        
+        # 批量处理视频
+        for i, video_path in enumerate(video_files, 1):
+            print(f'\n处理第 {i}/{len(video_files)} 个视频')
+            process_single_video(video_path, args, start_time)
+    else:
+        # 处理单个视频
+        video_path = './demo/video/' + args.video
+        process_single_video(video_path, args, start_time)
     
     # 计算总耗时
     end_time = time.time()
