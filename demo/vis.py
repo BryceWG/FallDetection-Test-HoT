@@ -125,12 +125,15 @@ def show3Dpose(vals, ax, fix_z):
 def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3'):
     """
     从视频中提取2D人体姿态关键点
+    分两个阶段：
+    1. YOLO人体检测
+    2. HRNet姿态估计
     """
     cap = cv2.VideoCapture(video_path)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    print('\n正在生成2D姿态...')
+    print('\n开始2D姿态生成过程...')
     with torch.no_grad():
         # 根据选择的检测器加载相应的模型
         if detector == 'yolo11':
@@ -142,11 +145,10 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3'):
             from lib.yolov3.human_detector import yolo_human_det as yolo_det
             print('使用YOLOv3检测器')
             
-        # 视频的第一帧应该检测到一个人
         keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True, detector=detector)
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
-    print('2D姿态生成成功!')
+    print('2D姿态生成完成!')
 
     output_dir += 'input_2D/'
     os.makedirs(output_dir, exist_ok=True)
@@ -154,30 +156,24 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3'):
     output_npz = output_dir + 'input_keypoints_2d.npz'
     np.savez_compressed(output_npz, reconstruction=keypoints)
     
-    # 如果需要，将2D姿态数据以JSON格式输出
     if save_json:
         json_data = []
-        # 假设keypoints[0]是第一个人的所有帧的关键点
+        print('\n正在生成JSON格式数据...')
         for frame_idx, frame_kpts in enumerate(keypoints[0]):
-            # 将关键点和置信度值展平为一个列表 [x1, y1, c1, x2, y2, c2, ..., x17, y17, c17]
             flattened_keypoints = []
             for kpt_idx in range(len(frame_kpts)):
                 x, y = frame_kpts[kpt_idx][0], frame_kpts[kpt_idx][1]
-                # 使用scores获取置信度值，如果可用
                 c = scores[0][frame_idx][kpt_idx] if scores is not None else 1.0
                 flattened_keypoints.extend([float(x), float(y), float(c)])
             
-            # 添加到JSON数据中
             json_data.append({
-                "idx": 0,  # 目前只有一个人
+                "idx": 0,
                 "keypoints": flattened_keypoints
             })
         
-        # 保存为JSON文件
-        import json
         with open(output_dir + 'keypoints_2d.json', 'w') as f:
             json.dump(json_data, f, indent=2)
-        print('2D姿态JSON数据已保存至:', output_dir + 'keypoints_2d.json')
+        print('JSON数据保存完成:', output_dir + 'keypoints_2d.json')
     
     return keypoints
 
