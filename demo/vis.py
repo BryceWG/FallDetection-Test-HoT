@@ -171,7 +171,6 @@ def get_pose2D(video_path, output_dir, save_json=False):
     
     return keypoints
 
-
 def visualize_pose2D(video_path, output_dir, keypoints=None):
     """
     可视化2D姿态并保存结果

@@ -17,3 +17,6 @@
 *.jsonl.gz
 *.jsonl.tar.gz
 .github
+
+# windsurf rules
+.windsurfrules
