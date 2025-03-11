@@ -86,7 +86,7 @@ def model_load(config):
     return model
 
 
-def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False):
+def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector='yolov3'):
     # Updating configuration
     args = get_default_args()
     args.det_dim = det_dim
@@ -97,6 +97,13 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False):
     cap = cv2.VideoCapture(video)
 
     # Loading detector and pose model, initialize sort for track
+    if detector == 'yolo11':
+        from lib.yolo11.human_detector import load_model as yolo_model
+        from lib.yolo11.human_detector import yolo_human_det as yolo_det
+    else:  # 默认使用YOLOv3
+        from lib.yolov3.human_detector import load_model as yolo_model
+        from lib.yolov3.human_detector import yolo_human_det as yolo_det
+        
     human_model = yolo_model(inp_dim=det_dim)
     pose_model = model_load(cfg)
     people_sort = Sort(min_hits=0)

@@ -122,7 +122,7 @@ def show3Dpose(vals, ax, fix_z):
     ax.tick_params('z', labelleft = False)
 
 
-def get_pose2D(video_path, output_dir, save_json=False):
+def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3'):
     """
     从视频中提取2D人体姿态关键点
     """
@@ -132,8 +132,18 @@ def get_pose2D(video_path, output_dir, save_json=False):
 
     print('\n正在生成2D姿态...')
     with torch.no_grad():
+        # 根据选择的检测器加载相应的模型
+        if detector == 'yolo11':
+            from lib.yolo11.human_detector import load_model as yolo_model
+            from lib.yolo11.human_detector import yolo_human_det as yolo_det
+            print('使用YOLO11检测器')
+        else:  # 默认使用YOLOv3
+            from lib.yolov3.human_detector import load_model as yolo_model
+            from lib.yolov3.human_detector import yolo_human_det as yolo_det
+            print('使用YOLOv3检测器')
+            
         # 视频的第一帧应该检测到一个人
-        keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True)
+        keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True, detector=detector)
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
     print('2D姿态生成成功!')
@@ -519,6 +529,7 @@ def process_args():
     parser.add_argument('--gen_video', action='store_true', help='生成视频')
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
     parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
+    parser.add_argument('--detector', type=str, default='yolov3', choices=['yolov3', 'yolo11'], help='选择人体检测器')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
@@ -549,7 +560,7 @@ if __name__ == "__main__":
     # 提取2D姿态
     keypoints = None
     if args.extract_2d:
-        keypoints = get_pose2D(video_path, output_dir, save_json=getattr(args, '2d_json', False))
+        keypoints = get_pose2D(video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector)
     
     # 可视化2D姿态
     if args.vis_2d:
