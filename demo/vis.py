@@ -241,8 +241,19 @@ def get_pose3D(video_path, output_dir, fix_z):
     offset = (n_chunks * args.frames - video_length) // 2
 
     ret, img = cap.read()
-    img_size = img.shape
-
+    
+    # 添加错误处理
+    if not ret or img is None:
+        print(f"错误: 无法读取视频帧，请检查视频路径: {video_path}")
+        # 创建一个默认尺寸的图像
+        img_size = (480, 640, 3)  # 默认尺寸 (高, 宽, 通道)
+        print(f"使用默认图像尺寸: {img_size}")
+    else:
+        img_size = img.shape
+        
+    # 重新定位视频指针到开始位置
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    
     # 3D姿态预测
     print('\n正在生成3D姿态...')
     frame_sum = 0
@@ -527,7 +538,7 @@ def process_args():
     parser.add_argument('--gen_video', action='store_true', help='生成视频')
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
     parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
-    parser.add_argument('--detector', type=str, default='yolov3', choices=['yolov3', 'yolo11'], help='选择人体检测器')
+    parser.add_argument('--detector', type=str, default='yolo11', choices=['yolov3', 'yolo11'], help='选择人体检测器')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
@@ -539,20 +550,36 @@ def process_single_video(video_path, args, start_time=None):
     处理单个视频文件
     """
     print(f'\n处理视频: {video_path}')
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    
+    # 检查视频路径是否为绝对路径
+    if os.path.isabs(video_path):
+        # 如果是绝对路径，直接使用
+        actual_video_path = video_path
+    else:
+        # 如果是相对路径，添加前缀
+        actual_video_path = './demo/video/' + video_path
+    
+    # 检查视频文件是否存在
+    if not os.path.exists(actual_video_path):
+        print(f"错误: 视频文件不存在: {actual_video_path}")
+        print("请检查视频路径是否正确")
+        return
+        
+    # 使用视频文件名作为输出目录名
+    video_name = os.path.splitext(os.path.basename(actual_video_path))[0]
     output_dir = './demo/output/' + video_name + '/'
     
     # 提取2D姿态
     keypoints = None
     if args.extract_2d:
-        keypoints = get_pose2D(video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector)
+        keypoints = get_pose2D(actual_video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector)
     
     # 可视化2D姿态
     if args.vis_2d:
         if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
             print('未找到2D关键点,请先提取2D姿态')
         else:
-            visualize_pose2D(video_path, output_dir, keypoints)
+            visualize_pose2D(actual_video_path, output_dir, keypoints)
     
     # 预测3D姿态
     output_3d_all = None
@@ -560,14 +587,14 @@ def process_single_video(video_path, args, start_time=None):
         if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
             print('未找到2D关键点,请先提取2D姿态')
         else:
-            output_3d_all = get_pose3D(video_path, output_dir, args.fix_z)
+            output_3d_all = get_pose3D(actual_video_path, output_dir, args.fix_z)
     
     # 可视化3D姿态
     if args.vis_3d:
         if not os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz') and output_3d_all is None:
             print('未找到3D关键点,请先预测3D姿态')
         else:
-            visualize_pose3D(video_path, output_dir, args.fix_z, output_3d_all)
+            visualize_pose3D(actual_video_path, output_dir, args.fix_z, output_3d_all)
     
     # 生成演示
     if args.gen_demo:
@@ -581,7 +608,7 @@ def process_single_video(video_path, args, start_time=None):
         if not os.path.exists(output_dir + 'pose/'):
             print('未找到演示图像,请先生成演示')
         else:
-            img2video(video_path, output_dir)
+            img2video(actual_video_path, output_dir)
     
     # 显示该视频的处理时间
     if start_time:
@@ -630,7 +657,8 @@ if __name__ == "__main__":
             process_single_video(video_path, args, start_time)
     else:
         # 处理单个视频
-        video_path = './demo/video/' + args.video
+        # 直接使用命令行参数中的视频路径，不再添加前缀
+        video_path = args.video
         process_single_video(video_path, args, start_time)
     
     # 计算总耗时

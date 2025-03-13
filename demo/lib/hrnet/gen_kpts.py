@@ -251,7 +251,29 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
     keypoints = np.array(all_keypoints)
     scores = np.array(all_scores)
     
-    keypoints = keypoints.transpose(1, 0, 2, 3)  # (T, M, N, 2) --> (M, T, N, 2)
-    scores = scores.transpose(1, 0, 2)  # (T, M, N) --> (M, T, N)
+    # 添加错误处理和调试信息
+    print(f"关键点数组形状: {keypoints.shape}")
+    
+    # 检查数组是否为空
+    if len(keypoints) == 0:
+        print("警告: 未检测到任何关键点，返回空数组")
+        # 返回符合预期形状的空数组
+        return np.zeros((1, 0, 17, 2)), np.zeros((1, 0, 17))
+    
+    # 检查维度是否足够进行转置
+    if len(keypoints.shape) < 4:
+        print(f"警告: 关键点数组维度不足 ({len(keypoints.shape)}D)，无法进行转置操作")
+        # 如果只有一帧，添加时间维度
+        if len(keypoints.shape) == 3:  # (M, N, 2)
+            keypoints = np.expand_dims(keypoints, axis=0)  # (1, M, N, 2)
+            scores = np.expand_dims(scores, axis=0)  # (1, M, N)
+            keypoints = keypoints.transpose(1, 0, 2, 3)  # (M, 1, N, 2)
+            scores = scores.transpose(1, 0, 2)  # (M, 1, N)
+        else:
+            # 返回符合预期形状的空数组
+            return np.zeros((1, 0, 17, 2)), np.zeros((1, 0, 17))
+    else:
+        keypoints = keypoints.transpose(1, 0, 2, 3)  # (T, M, N, 2) --> (M, T, N, 2)
+        scores = scores.transpose(1, 0, 2)  # (T, M, N) --> (M, T, N)
 
     return keypoints, scores
