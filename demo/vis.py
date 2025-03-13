@@ -460,7 +460,10 @@ def img2video(video_path, output_dir):
     """
     cap = cv2.VideoCapture(video_path)
     fps = int(cap.get(cv2.CAP_PROP_FPS))
-    video_name = video_path.split('/')[-1].split('.')[0]
+    
+    # 修改视频名称获取方式，避免路径问题
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    output_video_path = os.path.join(output_dir, video_name + '.mp4')
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -474,7 +477,7 @@ def img2video(video_path, output_dir):
     size = (img.shape[1], img.shape[0])
 
     print('\n正在生成视频...')
-    videoWrite = cv2.VideoWriter(output_dir + video_name + '.mp4', fourcc, fps, size) 
+    videoWrite = cv2.VideoWriter(output_video_path, fourcc, fps, size) 
 
     # 定义一个函数用于读取图像
     def read_image(name):
@@ -506,7 +509,7 @@ def img2video(video_path, output_dir):
         videoWrite.write(img)
 
     videoWrite.release()
-    print(f'视频生成成功: {output_dir + video_name}.mp4')
+    print(f'视频生成成功: {output_video_path}')
 
 
 def showimage(ax, img):
@@ -539,7 +542,7 @@ def process_args():
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
     parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
     parser.add_argument('--detector', type=str, default='yolo11', choices=['yolov3', 'yolo11'], help='选择人体检测器')
-    parser.add_argument('--batch_size', type=int, default=200, help='帧分组大小，默认为200帧')
+    parser.add_argument('--batch_size', type=int, default=400, help='帧分组大小，默认为400帧')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
