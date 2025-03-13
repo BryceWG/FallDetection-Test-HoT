@@ -123,7 +123,7 @@ def show3Dpose(vals, ax, fix_z):
     ax.tick_params('z', labelleft = False)
 
 
-def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3'):
+def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch_size=200):
     """
     从视频中提取2D人体姿态关键点
     分两个阶段：
@@ -146,7 +146,7 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3'):
             from lib.yolov3.human_detector import yolo_human_det as yolo_det
             print('使用YOLOv3检测器')
             
-        keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True, detector=detector)
+        keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True, detector=detector, batch_size=batch_size)
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
     print('2D姿态生成完成!')
@@ -539,6 +539,7 @@ def process_args():
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
     parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
     parser.add_argument('--detector', type=str, default='yolo11', choices=['yolov3', 'yolo11'], help='选择人体检测器')
+    parser.add_argument('--batch_size', type=int, default=200, help='帧分组大小，默认为200帧')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
@@ -572,7 +573,7 @@ def process_single_video(video_path, args, start_time=None):
     # 提取2D姿态
     keypoints = None
     if args.extract_2d:
-        keypoints = get_pose2D(actual_video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector)
+        keypoints = get_pose2D(actual_video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector, batch_size=args.batch_size)
     
     # 可视化2D姿态
     if args.vis_2d:
