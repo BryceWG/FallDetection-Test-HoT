@@ -12,7 +12,7 @@ def get_default_args():
             self.confidence = 0.70
             self.nms_thresh = 0.4
             self.det_dim = 416
-            self.weight_file = 'demo/lib/checkpoint/yolo11n.pt'  # 与YOLOv3保持相同的目录结构
+            self.weight_file = 'demo/lib/checkpoint/yolo11s.pt'  # 与YOLOv3保持相同的目录结构
             self.gpu = '0'
             # 新增YOLO11优化参数
             self.batch_size = 16      # 批处理大小

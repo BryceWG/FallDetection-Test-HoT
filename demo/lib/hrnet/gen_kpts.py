@@ -91,7 +91,7 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
     生成视频的关键点
     采用批量处理模式：先用YOLO处理所有帧，再用HRNet处理
     Args:
-        batch_size: 每批处理的帧数，默认200帧
+        batch_size
     """
     # 更新配置
     args = get_default_args()
