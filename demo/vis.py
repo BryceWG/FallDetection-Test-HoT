@@ -140,7 +140,10 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch
         if detector == 'yolo11':
             from lib.yolo11.human_detector import load_model as yolo_model
             from lib.yolo11.human_detector import yolo_human_det as yolo_det
+            from lib.yolo11.human_detector import reset_target
             print('使用YOLO11检测器')
+            # 重置目标锁定状态
+            reset_target()
         else:  # 默认使用YOLOv3
             from lib.yolov3.human_detector import load_model as yolo_model
             from lib.yolov3.human_detector import yolo_human_det as yolo_det

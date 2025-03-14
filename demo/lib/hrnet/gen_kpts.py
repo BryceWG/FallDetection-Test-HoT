@@ -110,6 +110,7 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
     if detector == 'yolo11':
         from lib.yolo11.human_detector import load_model as yolo_model
         from lib.yolo11.human_detector import yolo_human_det as yolo_det
+        from lib.yolo11.human_detector import reset_target  # 导入重置目标函数
         has_quiet_param = True
         yolo_batch_size = 16  # YOLO11的批处理大小
     else:  # 默认使用YOLOv3
@@ -121,10 +122,17 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
     human_model = yolo_model(inp_dim=det_dim)
     pose_model = model_load(cfg)
     people_sort = Sort(min_hits=0)
+    
+    # 重置目标锁定状态（如果使用YOLO11）
+    if detector == 'yolo11':
+        reset_target()
 
     # 用于存储所有结果
     all_keypoints = []
     all_scores = []
+    
+    # 用于跟踪目标ID
+    target_id = None
 
     for batch_idx in range(num_batches):
         start_frame = batch_idx * batch_size
@@ -156,9 +164,6 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
                     
                     # 处理每一帧的结果
                     for i, (bboxs, scores) in enumerate(zip(bboxs_batch, scores_batch)):
-                        if bboxs is None and batch_bboxs:  # 如果当前帧未检测到人且有上一帧结果
-                            bboxs = batch_bboxs[-1]
-                            scores = batch_scores[-1]
                         batch_bboxs.append(bboxs)
                         batch_scores.append(scores)
                     
@@ -172,15 +177,6 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
                     continue
                 
                 bboxs, scores = yolo_det(frame, human_model, reso=det_dim, confidence=args.thred_score)
-                
-                # 如果当前帧未检测到人，使用上一帧的结果
-                if bboxs is None or not bboxs.any():
-                    if batch_bboxs:  # 如果有上一帧的结果
-                        bboxs = batch_bboxs[-1]
-                        scores = batch_scores[-1]
-                    else:
-                        continue
-                        
                 batch_bboxs.append(bboxs)
                 batch_scores.append(scores)
 
@@ -201,23 +197,70 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
             bboxs = batch_bboxs[frame_idx]
             if bboxs is None:
                 continue
-                
-            # 使用Sort跟踪器更新
-            people_track = people_sort.update(bboxs)
-
-            # 处理跟踪结果
-            if people_track.shape[0] == 1:
-                people_track_ = people_track[-1, :-1].reshape(1, 4)
-            elif people_track.shape[0] >= 2:
-                people_track_ = people_track[-num_peroson:, :-1].reshape(num_peroson, 4)
-                people_track_ = people_track_[::-1]
+            
+            # 如果使用YOLO11，我们已经在YOLO阶段锁定了目标，直接使用检测结果
+            if detector == 'yolo11':
+                track_bboxs = []
+                for bbox in bboxs:
+                    bbox = [round(i, 2) for i in list(bbox)]
+                    track_bboxs.append(bbox)
             else:
-                continue
+                # 使用Sort跟踪器更新
+                people_track = people_sort.update(bboxs)
+                
+                # 如果是第一帧且有检测结果，锁定目标ID
+                if batch_idx == 0 and frame_idx == 0 and people_track.shape[0] > 0:
+                    # 计算每个检测框的面积
+                    areas = []
+                    for i in range(people_track.shape[0]):
+                        bbox = people_track[i, :-1]
+                        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                        areas.append((i, area, people_track[i, -1]))  # (索引, 面积, ID)
+                    
+                    # 按面积降序排序
+                    areas.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # 锁定面积最大的人体ID
+                    target_id = areas[0][2]
+                    print(f"已锁定目标ID: {target_id}, 面积: {areas[0][1]:.2f}")
+                
+                # 如果已锁定目标ID，只保留该ID的检测框
+                if target_id is not None:
+                    target_idx = -1
+                    for i in range(people_track.shape[0]):
+                        if people_track[i, -1] == target_id:
+                            target_idx = i
+                            break
+                    
+                    if target_idx >= 0:
+                        people_track_ = people_track[target_idx, :-1].reshape(1, 4)
+                    else:
+                        # 如果当前帧未找到目标ID，使用上一帧的结果
+                        if batch_kpts:
+                            # 跳过当前帧，使用上一帧的关键点
+                            batch_kpts.append(batch_kpts[-1])
+                            batch_kpts_scores.append(batch_kpts_scores[-1])
+                            continue
+                        else:
+                            # 如果没有上一帧结果，尝试使用当前帧的第一个检测结果
+                            if people_track.shape[0] > 0:
+                                people_track_ = people_track[0, :-1].reshape(1, 4)
+                            else:
+                                continue
+                else:
+                    # 如果未锁定目标ID，使用Sort的默认行为
+                    if people_track.shape[0] == 1:
+                        people_track_ = people_track[-1, :-1].reshape(1, 4)
+                    elif people_track.shape[0] >= 2:
+                        people_track_ = people_track[-num_peroson:, :-1].reshape(num_peroson, 4)
+                        people_track_ = people_track_[::-1]
+                    else:
+                        continue
 
-            track_bboxs = []
-            for bbox in people_track_:
-                bbox = [round(i, 2) for i in list(bbox)]
-                track_bboxs.append(bbox)
+                track_bboxs = []
+                for bbox in people_track_:
+                    bbox = [round(i, 2) for i in list(bbox)]
+                    track_bboxs.append(bbox)
 
             # HRNet处理
             with torch.no_grad():

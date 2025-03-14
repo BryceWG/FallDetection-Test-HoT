@@ -3,6 +3,13 @@ import torch
 import numpy as np
 import cv2
 
+# 全局变量用于存储锁定的目标信息
+target_locked = False
+target_bbox = None
+target_id = None
+frame_count = 0
+MAX_INIT_FRAMES = 3  # 最多检查前三帧
+
 def get_default_args():
     """
     返回默认参数
@@ -20,7 +27,7 @@ def get_default_args():
             self.vid_stride = 1       # 视频步长
             self.verbose = False      # 是否显示详细信息
             self.retina_masks = True  # 使用视网膜掩码提高精度
-            self.max_det = 1          # 最大检测数量(因为我们只关注一个人)
+            self.max_det = 5         # 最大检测数量(增加以便选择面积最大的人)
     
     return Args()
 
@@ -39,15 +46,34 @@ def load_model(args=None, CUDA=None, inp_dim=416):
     
     return model
 
+def calculate_area(bbox):
+    """
+    计算边界框面积
+    """
+    x1, y1, x2, y2 = bbox
+    return (x2 - x1) * (y2 - y1)
+
+def reset_target():
+    """
+    重置目标锁定状态
+    """
+    global target_locked, target_bbox, target_id, frame_count
+    target_locked = False
+    target_bbox = None
+    target_id = None
+    frame_count = 0
+
 def process_batch_frames(model, frames, args):
     """
     批量处理视频帧
     """
+    global target_locked, target_bbox, target_id, frame_count
+    
     results = model(
         frames,
         conf=args.confidence,          # 置信度阈值
         classes=0,                     # 只检测人类
-        max_det=args.max_det,         # 限制每帧最大检测数
+        max_det=args.max_det,          # 增加最大检测数量以便选择面积最大的人
         verbose=args.verbose,          # 静默模式
         retina_masks=args.retina_masks,# 使用视网膜掩码
         stream=args.stream,            # 使用流模式
@@ -58,22 +84,110 @@ def process_batch_frames(model, frames, args):
     
     for result in results:
         if result.boxes is not None and len(result.boxes) > 0:
-            # 获取最高置信度的检测结果
             boxes = result.boxes
-            conf_idx = boxes.conf.argmax() if len(boxes) > 1 else 0
             
-            # 获取边界框坐标
-            x1, y1, x2, y2 = boxes.xyxy[conf_idx].cpu().numpy()
-            bbox = [round(float(x), 2) for x in [x1, y1, x2, y2]]
-            score = float(boxes.conf[conf_idx].cpu().numpy())
-            
-            batch_bboxs.append(np.array([bbox]))
-            batch_scores.append(np.array([[score]]))
+            # 如果目标已锁定，则使用锁定的目标
+            if target_locked:
+                # 尝试找到与锁定目标最接近的检测框
+                best_iou = -1
+                best_idx = -1
+                
+                for i in range(len(boxes)):
+                    bbox = boxes.xyxy[i].cpu().numpy()
+                    iou = calculate_iou(target_bbox, bbox)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_idx = i
+                
+                # 如果找到匹配度较高的框，使用它
+                if best_iou > 0.5 and best_idx >= 0:
+                    x1, y1, x2, y2 = boxes.xyxy[best_idx].cpu().numpy()
+                    bbox = [round(float(x), 2) for x in [x1, y1, x2, y2]]
+                    score = float(boxes.conf[best_idx].cpu().numpy())
+                    target_bbox = bbox  # 更新目标框
+                else:
+                    # 如果没有找到匹配的框，使用上一帧的目标框
+                    bbox = target_bbox
+                    score = 1.0  # 默认置信度
+                
+                batch_bboxs.append(np.array([bbox]))
+                batch_scores.append(np.array([[score]]))
+            else:
+                # 目标未锁定，选择面积最大的人体
+                areas = []
+                for i in range(len(boxes)):
+                    x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
+                    area = (x2 - x1) * (y2 - y1)
+                    areas.append((i, area))
+                
+                # 按面积降序排序
+                areas.sort(key=lambda x: x[1], reverse=True)
+                
+                # 选择面积最大的人体
+                largest_idx = areas[0][0]
+                x1, y1, x2, y2 = boxes.xyxy[largest_idx].cpu().numpy()
+                bbox = [round(float(x), 2) for x in [x1, y1, x2, y2]]
+                score = float(boxes.conf[largest_idx].cpu().numpy())
+                
+                # 更新帧计数
+                frame_count += 1
+                
+                # 如果是前三帧中的第一帧检测到人体，锁定目标
+                if frame_count <= MAX_INIT_FRAMES and not target_locked:
+                    target_locked = True
+                    target_bbox = bbox
+                    print(f"已锁定目标! 帧: {frame_count}, 面积: {areas[0][1]:.2f}")
+                
+                batch_bboxs.append(np.array([bbox]))
+                batch_scores.append(np.array([[score]]))
         else:
-            batch_bboxs.append(None)
-            batch_scores.append(None)
+            # 如果当前帧未检测到人体
+            if target_locked:
+                # 如果目标已锁定，使用上一帧的目标框
+                batch_bboxs.append(np.array([target_bbox]))
+                batch_scores.append(np.array([[1.0]]))  # 默认置信度
+            else:
+                # 如果目标未锁定且当前帧未检测到人体
+                batch_bboxs.append(None)
+                batch_scores.append(None)
+                
+                # 更新帧计数
+                frame_count += 1
+                
+                # 如果前三帧都未检测到人体，报错
+                if frame_count >= MAX_INIT_FRAMES and not target_locked:
+                    print("警告: 前三帧未检测到任何人体!")
     
     return batch_bboxs, batch_scores
+
+def calculate_iou(box1, box2):
+    """
+    计算两个边界框的IoU (Intersection over Union)
+    """
+    # 确保输入是numpy数组
+    box1 = np.array(box1)
+    box2 = np.array(box2)
+    
+    # 计算交集区域
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    # 计算交集面积
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    
+    # 计算两个框的面积
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    # 计算并集面积
+    union = area1 + area2 - intersection
+    
+    # 计算IoU
+    iou = intersection / union if union > 0 else 0
+    
+    return iou
 
 def yolo_human_det(img, model=None, reso=416, confidence=0.70, quiet=True):
     """
@@ -82,6 +196,8 @@ def yolo_human_det(img, model=None, reso=416, confidence=0.70, quiet=True):
     Args:
         quiet: 是否静默处理（不显示检测信息）
     """
+    global target_locked, target_bbox, target_id, frame_count
+    
     args = get_default_args()
     args.confidence = confidence
     args.verbose = not quiet
@@ -103,25 +219,84 @@ def yolo_human_det(img, model=None, reso=416, confidence=0.70, quiet=True):
             img,
             conf=args.confidence,          # 置信度阈值
             classes=0,                     # 只检测人类
-            max_det=args.max_det,         # 限制最大检测数
+            max_det=args.max_det,          # 增加最大检测数量以便选择面积最大的人
             verbose=args.verbose,          # 静默模式
             retina_masks=args.retina_masks,# 使用视网膜掩码
         )
         
         if len(results) == 0:
+            # 如果目标已锁定，使用上一帧的目标框
+            if target_locked:
+                return np.array([target_bbox]), np.array([[1.0]])
             return None, None
 
         result = results[0]
         if result.boxes is not None and len(result.boxes) > 0:
-            # 获取最高置信度的检测结果
             boxes = result.boxes
-            conf_idx = boxes.conf.argmax() if len(boxes) > 1 else 0
             
-            # 获取边界框坐标
-            x1, y1, x2, y2 = boxes.xyxy[conf_idx].cpu().numpy()
-            bbox = [round(float(x), 2) for x in [x1, y1, x2, y2]]
-            score = float(boxes.conf[conf_idx].cpu().numpy())
-            
-            return np.array([bbox]), np.array([[score]])
+            # 如果目标已锁定，则使用锁定的目标
+            if target_locked:
+                # 尝试找到与锁定目标最接近的检测框
+                best_iou = -1
+                best_idx = -1
+                
+                for i in range(len(boxes)):
+                    bbox = boxes.xyxy[i].cpu().numpy()
+                    iou = calculate_iou(target_bbox, bbox)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_idx = i
+                
+                # 如果找到匹配度较高的框，使用它
+                if best_iou > 0.5 and best_idx >= 0:
+                    x1, y1, x2, y2 = boxes.xyxy[best_idx].cpu().numpy()
+                    bbox = [round(float(x), 2) for x in [x1, y1, x2, y2]]
+                    score = float(boxes.conf[best_idx].cpu().numpy())
+                    target_bbox = bbox  # 更新目标框
+                else:
+                    # 如果没有找到匹配的框，使用上一帧的目标框
+                    bbox = target_bbox
+                    score = 1.0  # 默认置信度
+                
+                return np.array([bbox]), np.array([[score]])
+            else:
+                # 目标未锁定，选择面积最大的人体
+                areas = []
+                for i in range(len(boxes)):
+                    x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
+                    area = (x2 - x1) * (y2 - y1)
+                    areas.append((i, area))
+                
+                # 按面积降序排序
+                areas.sort(key=lambda x: x[1], reverse=True)
+                
+                # 选择面积最大的人体
+                largest_idx = areas[0][0]
+                x1, y1, x2, y2 = boxes.xyxy[largest_idx].cpu().numpy()
+                bbox = [round(float(x), 2) for x in [x1, y1, x2, y2]]
+                score = float(boxes.conf[largest_idx].cpu().numpy())
+                
+                # 更新帧计数
+                frame_count += 1
+                
+                # 如果是前三帧中的第一帧检测到人体，锁定目标
+                if frame_count <= MAX_INIT_FRAMES and not target_locked:
+                    target_locked = True
+                    target_bbox = bbox
+                    print(f"已锁定目标! 帧: {frame_count}, 面积: {areas[0][1]:.2f}")
+                
+                return np.array([bbox]), np.array([[score]])
         
+        # 如果当前帧未检测到人体
+        if target_locked:
+            # 如果目标已锁定，使用上一帧的目标框
+            return np.array([target_bbox]), np.array([[1.0]])
+        
+        # 更新帧计数
+        frame_count += 1
+        
+        # 如果前三帧都未检测到人体，报错
+        if frame_count >= MAX_INIT_FRAMES and not target_locked:
+            print("警告: 前三帧未检测到任何人体!")
+            
         return None, None 
