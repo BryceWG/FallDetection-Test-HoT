@@ -126,33 +126,25 @@ def show3Dpose(vals, ax, fix_z):
 def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch_size=200):
     """
     从视频中提取2D人体姿态关键点
-    分两个阶段：
-    1. YOLO人体检测
-    2. HRNet姿态估计
     """
     cap = cv2.VideoCapture(video_path)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    print('\n开始2D姿态生成过程...')
+    print('⏳ 生成2D姿态...')
     with torch.no_grad():
-        # 根据选择的检测器加载相应的模型
         if detector == 'yolo11':
             from lib.yolo11.human_detector import load_model as yolo_model
             from lib.yolo11.human_detector import yolo_human_det as yolo_det
             from lib.yolo11.human_detector import reset_target
-            print('使用YOLO11检测器')
-            # 重置目标锁定状态
             reset_target()
         else:  # 默认使用YOLOv3
             from lib.yolov3.human_detector import load_model as yolo_model
             from lib.yolov3.human_detector import yolo_human_det as yolo_det
-            print('使用YOLOv3检测器')
             
         keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True, detector=detector, batch_size=batch_size)
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
-    print('2D姿态生成完成!')
 
     output_dir += 'input_2D/'
     os.makedirs(output_dir, exist_ok=True)
@@ -162,7 +154,6 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch
     
     if save_json:
         json_data = []
-        print('\n正在生成JSON格式数据...')
         for frame_idx, frame_kpts in enumerate(keypoints[0]):
             flattened_keypoints = []
             for kpt_idx in range(len(frame_kpts)):
@@ -177,8 +168,8 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch
         
         with open(output_dir + 'keypoints_2d.json', 'w') as f:
             json.dump(json_data, f, indent=2)
-        print('JSON数据保存完成:', output_dir + 'keypoints_2d.json')
     
+    print('✓ 2D姿态生成完成')
     return keypoints
 
 def visualize_pose2D(video_path, output_dir, keypoints=None):
@@ -186,17 +177,16 @@ def visualize_pose2D(video_path, output_dir, keypoints=None):
     可视化2D姿态并保存结果
     """
     if keypoints is None:
-        # 如果没有提供关键点,则从保存的文件加载
         keypoints = np.load(output_dir + 'input_2D/input_keypoints_2d.npz', allow_pickle=True)['reconstruction']
     
     cap = cv2.VideoCapture(video_path)
     video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    print('\n正在可视化2D姿态...')
+    print('⏳ 可视化2D姿态...')
     output_dir_2D = output_dir + 'pose2D/'
     os.makedirs(output_dir_2D, exist_ok=True)
     
-    for i in tqdm(range(video_length)):
+    for i in tqdm(range(video_length), desc='2D可视化', leave=False):
         ret, img = cap.read()
         if not ret:
             break
@@ -204,7 +194,7 @@ def visualize_pose2D(video_path, output_dir, keypoints=None):
         image = show2Dpose(keypoints[0][i], copy.deepcopy(img))
         cv2.imwrite(output_dir_2D + str(('%04d'% i)) + '_2D.png', image)
     
-    print('2D姿态可视化完成!')
+    print('✓ 2D姿态可视化完成')
     return output_dir_2D
 
 
@@ -219,19 +209,16 @@ def get_pose3D(video_path, output_dir, fix_z):
     args.previous_dir = 'checkpoint/pretrained/hot_mixste'
     args.n_joints, args.out_joints = 17, 17
 
+    print('⏳ 生成3D姿态...')
+    
     # 加载模型
     model = Model(args).cuda()
-
     model_dict = model.state_dict()
-    # 预训练模型放在 'checkpoint/pretrained/hot_mixste'
     model_path = sorted(glob.glob(os.path.join(args.previous_dir, '*.pth')))[0]
-
     pre_dict = torch.load(model_path)
-    model_dict = model.state_dict()
     state_dict = {k: v for k, v in pre_dict.items() if k in model_dict.keys()}
     model_dict.update(state_dict)
     model.load_state_dict(model_dict)
-
     model.eval()
 
     # 加载2D关键点
@@ -244,26 +231,17 @@ def get_pose3D(video_path, output_dir, fix_z):
     offset = (n_chunks * args.frames - video_length) // 2
 
     ret, img = cap.read()
-    
-    # 添加错误处理
     if not ret or img is None:
-        print(f"错误: 无法读取视频帧，请检查视频路径: {video_path}")
-        # 创建一个默认尺寸的图像
-        img_size = (480, 640, 3)  # 默认尺寸 (高, 宽, 通道)
-        print(f"使用默认图像尺寸: {img_size}")
+        img_size = (480, 640, 3)
     else:
         img_size = img.shape
-        
-    # 重新定位视频指针到开始位置
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    # 3D姿态预测
-    print('\n正在生成3D姿态...')
     frame_sum = 0
     output_3d_all = None
     
-    for i in tqdm(range(n_chunks)):
-        # 输入帧
+    for i in tqdm(range(n_chunks), desc='3D预测', leave=False):
+        # 处理每个chunk的代码保持不变...
         start_index = i*args.frames - offset
         end_index = (i+1)*args.frames - offset
 
@@ -288,12 +266,10 @@ def get_pose3D(video_path, output_dir, fix_z):
         input_2D = np.concatenate((np.expand_dims(input_2D, axis=0), np.expand_dims(input_2D_aug, axis=0)), 0)
         
         input_2D = input_2D[np.newaxis, :, :, :, :]
-
         input_2D = torch.from_numpy(input_2D.astype('float32')).cuda()
 
         N = input_2D.size(0)
 
-        # 预测
         with torch.no_grad():
             output_3D_non_flip = model(input_2D[:, 0])
             output_3D_flip     = model(input_2D[:, 1])
@@ -321,11 +297,6 @@ def get_pose3D(video_path, output_dir, fix_z):
         else:
             output_3d_all = np.concatenate([output_3d_all, post_out], axis = 0)
 
-        # 坐标系转换
-        rot = [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
-        rot = np.array(rot, dtype='float32')
-        post_out = camera_to_world(post_out, R=rot, t=0)
-        
         frame_sum = high_index
     
     # 保存3D关键点
@@ -333,7 +304,7 @@ def get_pose3D(video_path, output_dir, fix_z):
     output_npz = output_dir + 'output_3D/' + 'output_keypoints_3d.npz'
     np.savez_compressed(output_npz, reconstruction=output_3d_all)
 
-    print('3D姿态生成成功!')
+    print('✓ 3D姿态生成完成')
     return output_3d_all
 
 
@@ -342,10 +313,8 @@ def visualize_pose3D(video_path, output_dir, fix_z, output_3d_all=None):
     可视化3D姿态并保存结果
     """
     if output_3d_all is None:
-        # 如果没有提供3D关键点,则从保存的文件加载
         output_3d_all = np.load(output_dir + 'output_3D/output_keypoints_3d.npz', allow_pickle=True)['reconstruction']
     
-    # 坐标系转换
     rot = [0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088]
     rot = np.array(rot, dtype='float32')
     post_out = camera_to_world(output_3d_all, R=rot, t=0)
@@ -353,12 +322,11 @@ def visualize_pose3D(video_path, output_dir, fix_z, output_3d_all=None):
     cap = cv2.VideoCapture(video_path)
     video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    print('\n正在可视化3D姿态...')
+    print('⏳ 可视化3D姿态...')
     output_dir_3D = output_dir + 'pose3D/'
     os.makedirs(output_dir_3D, exist_ok=True)
     
-    for i in tqdm(range(min(video_length, len(post_out)))):
-        # 3D可视化
+    for i in tqdm(range(min(video_length, len(post_out))), desc='3D可视化', leave=False):
         fig = plt.figure(figsize=(9.6, 5.4))
         gs = gridspec.GridSpec(1, 1)
         gs.update(wspace=-0.00, hspace=0.05) 
@@ -370,16 +338,14 @@ def visualize_pose3D(video_path, output_dir, fix_z, output_3d_all=None):
         plt.savefig(output_dir_3D + str(('%04d'% i)) + '_3D.png', dpi=200, format='png', bbox_inches = 'tight')
         plt.close()
     
-    print('3D姿态可视化完成!')
+    print('✓ 3D姿态可视化完成')
     return output_dir_3D
 
 
 def generate_demo(output_dir):
     """
     生成最终的演示视频,将2D和3D姿态并排展示
-    使用OpenCV代替matplotlib以提高速度
     """
-    # 获取已生成的2D和3D姿态图像
     output_dir_2D = output_dir + 'pose2D/'
     output_dir_3D = output_dir + 'pose3D/'
     
@@ -387,23 +353,19 @@ def generate_demo(output_dir):
     image_3d_dir = sorted(glob.glob(os.path.join(output_dir_3D, '*.png')))
     
     if not image_2d_dir or not image_3d_dir:
-        print('未找到2D或3D姿态图像,请先生成它们')
         return
     
-    print('\n正在生成演示...')
+    print('⏳ 生成演示图像...')
     output_dir_pose = output_dir + 'pose/'
     os.makedirs(output_dir_pose, exist_ok=True)
     
-    for i in tqdm(range(min(len(image_2d_dir), len(image_3d_dir)))):
-        # 使用OpenCV读取图像
+    for i in tqdm(range(min(len(image_2d_dir), len(image_3d_dir))), desc='合成图像', leave=False):
         image_2d = cv2.imread(image_2d_dir[i])
         image_3d = cv2.imread(image_3d_dir[i])
         
-        # 转换为RGB颜色空间（如果需要）
         image_2d = cv2.cvtColor(image_2d, cv2.COLOR_BGR2RGB)
         image_3d = cv2.cvtColor(image_3d, cv2.COLOR_BGR2RGB)
 
-        # 裁剪
         edge = (image_2d.shape[1] - image_2d.shape[0]) // 2 - 1
         edge_1 = 10
         image_2d = image_2d[edge_1:image_2d.shape[0] - edge_1, edge + edge_1:image_2d.shape[1] - edge - edge_1]
@@ -411,48 +373,37 @@ def generate_demo(output_dir):
         edge = 130
         image_3d = image_3d[edge:image_3d.shape[0] - edge, edge:image_3d.shape[1] - edge]
         
-        # 调整图像大小以确保两张图片高度相同
         h1, w1 = image_2d.shape[:2]
         h2, w2 = image_3d.shape[:2]
         target_height = max(h1, h2)
         
-        # 调整图像大小，保持纵横比
         new_w1 = int(w1 * (target_height / h1))
         new_w2 = int(w2 * (target_height / h2))
         
         image_2d = cv2.resize(image_2d, (new_w1, target_height))
         image_3d = cv2.resize(image_3d, (new_w2, target_height))
         
-        # 创建标题
         title_height = 30
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.8
         font_thickness = 2
-        title_color = (0, 0, 0)  # 黑色
+        title_color = (0, 0, 0)
         
-        # 为图像添加标题空间
         img_2d_with_title = np.ones((target_height + title_height, new_w1, 3), dtype=np.uint8) * 255
         img_3d_with_title = np.ones((target_height + title_height, new_w2, 3), dtype=np.uint8) * 255
         
-        # 添加标题
         cv2.putText(img_2d_with_title, "Input", (10, title_height - 10), font, font_scale, title_color, font_thickness)
         cv2.putText(img_3d_with_title, "Reconstruction", (10, title_height - 10), font, font_scale, title_color, font_thickness)
         
-        # 将图像放入带标题的画布中
         img_2d_with_title[title_height:, :, :] = image_2d
         img_3d_with_title[title_height:, :, :] = image_3d
         
-        # 水平拼接两张图像
         combined_img = np.hstack((img_2d_with_title, img_3d_with_title))
-        
-        # 转换回BGR颜色空间用于保存
         combined_img = cv2.cvtColor(combined_img, cv2.COLOR_RGB2BGR)
         
-        # 保存结果
-        output_path = output_dir_pose + str(('%04d'% i)) + '_pose.png'
-        cv2.imwrite(output_path, combined_img)
+        cv2.imwrite(output_dir_pose + str(('%04d'% i)) + '_pose.png', combined_img)
     
-    print('演示生成成功!')
+    print('✓ 演示图像生成完成')
     return output_dir + 'pose/'
 
 
@@ -464,7 +415,6 @@ def img2video(video_path, output_dir):
     cap = cv2.VideoCapture(video_path)
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     
-    # 修改视频名称获取方式，避免路径问题
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_video_path = os.path.join(output_dir, video_name + '.mp4')
 
@@ -472,47 +422,37 @@ def img2video(video_path, output_dir):
 
     names = sorted(glob.glob(os.path.join(output_dir + 'pose/', '*.png')))
     if not names:
-        print('未找到图像序列,请先生成演示')
         return
         
-    # 读取第一张图片获取尺寸
     img = cv2.imread(names[0])
     size = (img.shape[1], img.shape[0])
 
-    print('\n正在生成视频...')
+    print('⏳ 生成视频...')
     videoWrite = cv2.VideoWriter(output_video_path, fourcc, fps, size) 
 
-    # 定义一个函数用于读取图像
     def read_image(name):
         return cv2.imread(name)
     
-    # 使用线程池并行读取图像
     frames = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        # 提交所有读取任务并获取future对象
         future_to_name = {executor.submit(read_image, name): name for name in names}
         
-        # 使用tqdm显示进度
-        for future in tqdm(concurrent.futures.as_completed(future_to_name), total=len(names), desc="读取图像"):
+        for future in tqdm(concurrent.futures.as_completed(future_to_name), total=len(names), desc="读取帧", leave=False):
             name = future_to_name[future]
             try:
-                # 获取结果并保存到列表中
                 img = future.result()
-                # 保存图像和对应的索引，以便后续按顺序写入
                 index = names.index(name)
                 frames.append((index, img))
             except Exception as exc:
-                print(f'{name} 读取失败: {exc}')
+                print(f'⚠️ 帧 {name} 读取失败')
     
-    # 按原始顺序排序帧
     frames.sort(key=lambda x: x[0])
     
-    # 写入视频
-    for _, img in tqdm(frames, desc="写入视频"):
+    for _, img in tqdm(frames, desc="写入视频", leave=False):
         videoWrite.write(img)
 
     videoWrite.release()
-    print(f'视频生成成功: {output_video_path}')
+    print(f'✓ 视频生成完成: {os.path.basename(output_video_path)}')
 
 
 def showimage(ax, img):
@@ -545,31 +485,35 @@ def process_args():
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
     parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
     parser.add_argument('--detector', type=str, default='yolo11', choices=['yolov3', 'yolo11'], help='选择人体检测器')
-    parser.add_argument('--batch_size', type=int, default=400, help='帧分组大小，默认为400帧')
+    parser.add_argument('--batch_size', type=int, default=2000, help='帧分组大小，默认为2000帧')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
     return args
 
 
-def process_single_video(video_path, args, start_time=None):
+def process_single_video(video_path, args, start_time=None, total_videos=None, current_video=None):
     """
     处理单个视频文件
     """
-    print(f'\n处理视频: {video_path}')
+    # 获取视频名称用于显示
+    video_name = os.path.basename(video_path)
+    
+    # 如果是批量处理，显示简化的进度信息
+    if total_videos:
+        print(f'\n[{current_video}/{total_videos}] 处理: {video_name}')
+    else:
+        print(f'\n处理视频: {video_name}')
     
     # 检查视频路径是否为绝对路径
     if os.path.isabs(video_path):
-        # 如果是绝对路径，直接使用
         actual_video_path = video_path
     else:
-        # 如果是相对路径，添加前缀
         actual_video_path = './demo/video/' + video_path
     
     # 检查视频文件是否存在
     if not os.path.exists(actual_video_path):
         print(f"错误: 视频文件不存在: {actual_video_path}")
-        print("请检查视频路径是否正确")
         return
         
     # 使用视频文件名作为输出目录名
@@ -584,7 +528,7 @@ def process_single_video(video_path, args, start_time=None):
     # 可视化2D姿态
     if args.vis_2d:
         if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
-            print('未找到2D关键点,请先提取2D姿态')
+            print('⚠️ 未找到2D关键点')
         else:
             visualize_pose2D(actual_video_path, output_dir, keypoints)
     
@@ -592,28 +536,28 @@ def process_single_video(video_path, args, start_time=None):
     output_3d_all = None
     if args.predict_3d:
         if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
-            print('未找到2D关键点,请先提取2D姿态')
+            print('⚠️ 未找到2D关键点')
         else:
             output_3d_all = get_pose3D(actual_video_path, output_dir, args.fix_z)
     
     # 可视化3D姿态
     if args.vis_3d:
         if not os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz') and output_3d_all is None:
-            print('未找到3D关键点,请先预测3D姿态')
+            print('⚠️ 未找到3D关键点')
         else:
             visualize_pose3D(actual_video_path, output_dir, args.fix_z, output_3d_all)
     
     # 生成演示
     if args.gen_demo:
         if not os.path.exists(output_dir + 'pose2D/') or not os.path.exists(output_dir + 'pose3D/'):
-            print('未找到2D或3D姿态图像,请先生成它们')
+            print('⚠️ 未找到2D或3D姿态图像')
         else:
             generate_demo(output_dir)
     
     # 生成视频
     if args.gen_video:
         if not os.path.exists(output_dir + 'pose/'):
-            print('未找到演示图像,请先生成演示')
+            print('⚠️ 未找到演示图像')
         else:
             img2video(actual_video_path, output_dir)
     
@@ -622,7 +566,7 @@ def process_single_video(video_path, args, start_time=None):
         current_time = time.time()
         elapsed_time = current_time - start_time
         minutes, seconds = divmod(elapsed_time, 60)
-        print(f'视频 {video_name} 处理完成! 耗时: {int(minutes)}分{seconds:.2f}秒')
+        print(f'✓ 完成处理 [{int(minutes)}分{seconds:.1f}秒]')
 
 
 if __name__ == "__main__":
@@ -653,18 +597,15 @@ if __name__ == "__main__":
             print(f'错误: 在目录 {args.video_dir} 中未找到视频文件')
             sys.exit(1)
         
-        # 显示找到的视频文件
-        print(f'找到 {len(video_files)} 个视频文件:')
-        for video_file in video_files:
-            print(f'- {os.path.basename(video_file)}')
+        # 显示找到的视频总数
+        total_videos = len(video_files)
+        print(f'找到 {total_videos} 个视频文件，开始处理...')
         
         # 批量处理视频
         for i, video_path in enumerate(video_files, 1):
-            print(f'\n处理第 {i}/{len(video_files)} 个视频')
-            process_single_video(video_path, args, start_time)
+            process_single_video(video_path, args, start_time, total_videos, i)
     else:
         # 处理单个视频
-        # 直接使用命令行参数中的视频路径，不再添加前缀
         video_path = args.video
         process_single_video(video_path, args, start_time)
     
@@ -672,7 +613,7 @@ if __name__ == "__main__":
     end_time = time.time()
     total_time = end_time - start_time
     minutes, seconds = divmod(total_time, 60)
-    print(f'\n总耗时: {int(minutes)}分{seconds:.2f}秒')
+    print(f'\n总耗时: {int(minutes)}分{seconds:.1f}秒')
     
     if args.all:
-        print('所有步骤执行完成!')
+        print('✓ 所有步骤执行完成!')
