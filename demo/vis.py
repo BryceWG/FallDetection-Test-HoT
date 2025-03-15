@@ -197,6 +197,29 @@ def visualize_pose2D(video_path, output_dir, keypoints=None):
     print('✓ 2D姿态可视化完成')
     return output_dir_2D
 
+def visualize_pose2D_first_frame(video_path, output_dir, keypoints=None):
+    """
+    只可视化并保存第一帧的2D姿态
+    """
+    if keypoints is None:
+        keypoints = np.load(output_dir + 'input_2D/input_keypoints_2d.npz', allow_pickle=True)['reconstruction']
+    
+    cap = cv2.VideoCapture(video_path)
+    ret, img = cap.read()
+    if not ret:
+        print('⚠️ 无法读取视频第一帧')
+        return None
+        
+    print('⏳ 生成第一帧2D姿态...')
+    output_dir_2D = output_dir + 'pose2D/'
+    os.makedirs(output_dir_2D, exist_ok=True)
+    
+    image = show2Dpose(keypoints[0][0], copy.deepcopy(img))
+    output_path = output_dir_2D + 'first_frame_2D.png'
+    cv2.imwrite(output_path, image)
+    
+    print('✓ 第一帧2D姿态已保存')
+    return output_dir_2D
 
 def get_pose3D(video_path, output_dir, fix_z):
     """
@@ -479,6 +502,7 @@ def process_args():
     parser.add_argument('--extract_2d', action='store_true', help='提取2D姿态')
     parser.add_argument('--predict_3d', action='store_true', help='预测3D姿态')
     parser.add_argument('--vis_2d', action='store_true', help='可视化2D姿态')
+    parser.add_argument('--vis_2d_first', action='store_true', help='只保存第一帧的2D姿态图片')
     parser.add_argument('--vis_3d', action='store_true', help='可视化3D姿态')
     parser.add_argument('--gen_demo', action='store_true', help='生成演示(2D和3D并排)')
     parser.add_argument('--gen_video', action='store_true', help='生成视频')
@@ -525,12 +549,15 @@ def process_single_video(video_path, args, start_time=None, total_videos=None, c
     if args.extract_2d:
         keypoints = get_pose2D(actual_video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector, batch_size=args.batch_size)
     
-    # 可视化2D姿态
-    if args.vis_2d:
+    # 可视化2D姿态(完整或仅第一帧)
+    if args.vis_2d or args.vis_2d_first:
         if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
             print('⚠️ 未找到2D关键点')
         else:
-            visualize_pose2D(actual_video_path, output_dir, keypoints)
+            if args.vis_2d:
+                visualize_pose2D(actual_video_path, output_dir, keypoints)
+            if args.vis_2d_first:
+                visualize_pose2D_first_frame(actual_video_path, output_dir, keypoints)
     
     # 预测3D姿态
     output_3d_all = None
