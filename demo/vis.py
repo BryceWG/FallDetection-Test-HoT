@@ -544,6 +544,28 @@ def process_single_video(video_path, args, start_time=None, total_videos=None, c
     video_name = os.path.splitext(os.path.basename(actual_video_path))[0]
     output_dir = './demo/output/' + video_name + '/'
     
+    # 检查输出目录是否已存在
+    if os.path.exists(output_dir):
+        # 检查是否包含必要的处理结果
+        has_2d = os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz')
+        has_3d = os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz')
+        has_vis = os.path.exists(output_dir + 'pose/')
+        
+        # 根据参数检查是否需要跳过
+        should_skip = True
+        if args.extract_2d and not has_2d:
+            should_skip = False
+        if args.predict_3d and not has_3d:
+            should_skip = False
+        if args.gen_demo and not has_vis:
+            should_skip = False
+            
+        if should_skip:
+            print(f'⏭️ 跳过已处理的视频: {video_name}')
+            return
+        else:
+            print(f'⚠️ 发现不完整的处理结果，继续处理: {video_name}')
+    
     # 提取2D姿态
     keypoints = None
     if args.extract_2d:
