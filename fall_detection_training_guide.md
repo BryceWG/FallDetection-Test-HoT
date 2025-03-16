@@ -62,6 +62,8 @@ sample_video2,0,,
 | `--fall_seq_length` | int | 30 | 跌倒视频序列长度 |
 | `--fall_stride` | int | 15 | 跌倒视频滑动步长 |
 | `--overlap_threshold` | float | 0.3 | 跌倒判定的重叠比例阈值 |
+| `--test_ratio` | float | 0.2 | 测试集占总数据的比例 |
+| `--val_ratio` | float | 0.25 | 验证集占训练数据的比例 |
 | `--batch_size` | int | 16 | 批大小 |
 | `--num_epochs` | int | 50 | 训练轮数 |
 | `--learning_rate` | float | 0.001 | 学习率 |
@@ -69,7 +71,7 @@ sample_video2,0,,
 | `--hidden_dim` | int | 256 | LSTM隐藏层维度 |
 | `--num_layers` | int | 3 | LSTM层数 |
 | `--dropout` | float | 0.3 | Dropout比例 |
-| `--save_dir` | str | `./checkpoints/fall_detection_lstm/` | 模型保存目录 |
+| `--save_dir` | str | `./checkpoint/fall_detection_lstm/{timestamp}` | 模型保存目录 |
 | `--gpu` | str | '0' | GPU ID |
 | `--seed` | int | 42 | 随机种子 |
 | `--test_only` | flag | False | 仅测试模式 |
@@ -90,10 +92,10 @@ python train_lstm.py --label_file fall_frame_data.csv --data_dir ./demo/output/ 
                     --normal_seq_length 30 --normal_stride 20 \
                     --fall_seq_length 30 --fall_stride 15 \
                     --overlap_threshold 0.3 \
+                    --test_ratio 0.2 --val_ratio 0.25 \
                     --batch_size 8 --num_epochs 100 \
                     --learning_rate 0.0005 --hidden_dim 256 \
-                    --num_layers 3 --dropout 0.3 \
-                    --save_dir ./my_models/fall_detection/
+                    --num_layers 3 --dropout 0.3
 ```
 
 ### 数据集生成策略
@@ -118,7 +120,10 @@ python train_lstm.py --label_file fall_frame_data.csv --data_dir ./demo/output/ 
 
 训练过程中会：
 
-1. 自动将数据集划分为训练集（60%）、验证集（20%）和测试集（20%）
+1. 自动将数据集划分为训练集、验证集和测试集：
+   - 首先分出测试集（由`test_ratio`控制，默认20%）
+   - 剩余数据再划分出验证集（由`val_ratio`控制，默认25%）
+   - 剩下的数据作为训练集
 2. 每个epoch结束后显示训练和验证的损失与准确率
 3. 使用ReduceLROnPlateau调整学习率，在验证损失不再下降时降低学习率
 4. 保存最佳模型（基于验证损失）
@@ -141,14 +146,14 @@ python train_lstm.py --label_file fall_frame_data.csv --data_dir ./demo/output/ 
 使用`--test_only`参数可以仅进行评估而不训练：
 
 ```bash
-python train_fall_detection.py --label_file path/to/labels.csv \
-                               --checkpoint ./checkpoints/fall_detection/best_model.pth \
-                               --test_only
+python train_lstm.py --label_file path/to/labels.csv \
+                    --checkpoint ./checkpoint/fall_detection_lstm/2024-03-16-1326/best_model.pth \
+                    --test_only
 ```
 
 ## 输出文件
 
-训练与评估过程会生成以下文件：
+训练与评估过程会生成以下文件，所有文件都保存在带时间戳的目录中（例如：`./checkpoint/fall_detection_lstm/2024-03-16-1326/`）：
 
 - **模型检查点**：
   - `best_model.pth`：最佳性能的模型
@@ -176,6 +181,7 @@ python train_fall_detection.py --label_file path/to/labels.csv \
 - 序列长度应根据视频帧率和跌倒持续时间适当调整
 - 如果GPU内存不足，可以减小批量大小或序列长度
 - 对于不同场景（如室内/室外、不同角度）的泛化能力，建议使用多样化的训练数据
+- 合理设置数据集划分比例，确保每个集合都有足够的样本
 
 ## 故障排除
 
@@ -189,3 +195,4 @@ python train_fall_detection.py --label_file path/to/labels.csv \
 - **数据增强**：添加随机旋转、缩放、噪声等增强方法
 - **迁移学习**：使用其他数据集预训练模型
 - **模型集成**：结合多个模型的预测结果提高准确率
+- **超参数优化**：使用网格搜索或贝叶斯优化寻找最佳参数组合

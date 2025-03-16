@@ -520,6 +520,10 @@ def process_args():
     parser.add_argument('--fall_stride', type=int, default=15, help='跌倒视频滑动步长')
     parser.add_argument('--overlap_threshold', type=float, default=0.3, help='跌倒判定的重叠比例阈值')
     
+    # 数据集划分参数
+    parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
+    
     # 其他原有参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
     parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
@@ -590,7 +594,7 @@ def main():
     # 划分训练集和测试集
     train_indices, test_indices = train_test_split(
         range(len(full_dataset)),
-        test_size=0.2,
+        test_size=args.test_ratio,
         stratify=[full_dataset[i]['label'].item() for i in range(len(full_dataset))],
         random_state=args.seed
     )
@@ -598,7 +602,7 @@ def main():
     # 划分训练集和验证集
     train_indices, val_indices = train_test_split(
         train_indices,
-        test_size=0.25,  # 验证集占训练集的25%
+        test_size=args.val_ratio,  # 验证集占训练数据的比例
         stratify=[full_dataset[i]['label'].item() for i in train_indices],
         random_state=args.seed
     )
