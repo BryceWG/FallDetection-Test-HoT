@@ -517,21 +517,21 @@ def process_args():
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
-    parser.add_argument('--fall_stride', type=int, default=15, help='跌倒视频滑动步长')
-    parser.add_argument('--overlap_threshold', type=float, default=0.3, help='跌倒判定的重叠比例阈值')
+    parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
+    parser.add_argument('--overlap_threshold', type=float, default=0.5, help='跌倒判定的重叠比例阈值')
     
     # 数据集划分参数
-    parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
+    parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
     parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
     
     # 其他原有参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
-    parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
+    parser.add_argument('--num_epochs', type=int, default=40, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
+    parser.add_argument('--weight_decay', type=float, default=5e-6, help='权重衰减')
     parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=3, help='LSTM层数')
-    parser.add_argument('--dropout', type=float, default=0.4, help='Dropout比例')
+    parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
     
     # 生成带时间戳的保存目录
     timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
