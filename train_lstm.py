@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
+# python train_lstm.py --label_file fall_frame_data.csv --data_dir ./demo/output/ --seq_length 30 --stride 15 --batch_size 8 --num_epochs 100 --learning_rate 0.0005 --hidden_dim 256 --num_layers 3 --dropout 0.3 --save_dir ./my_models/fall_detection/ 
 import os
 import sys
 import glob
@@ -104,6 +104,8 @@ class PoseSequenceDataset(Dataset):
     def _create_sequence_samples(self):
         """
         创建序列样本索引
+        - 非跌倒视频: 序列长度30帧,滑动步长20,全部标记为非跌倒(0)
+        - 跌倒视频: 序列长度30帧,滑动步长15,根据与跌倒帧段重叠比例判断标签
         """
         self.samples = []
         
@@ -118,68 +120,73 @@ class PoseSequenceDataset(Dataset):
                 
             # 加载3D姿态数据
             pose_data = np.load(npz_file, allow_pickle=True)['reconstruction']
+            total_frames = len(pose_data)
             
-            if self.test_mode:
-                # 测试模式: 使用整个序列
-                self.samples.append({
-                    'video_id': video_id,
-                    'pose_file': npz_file,
-                    'label': int(row['has_fall']),
-                    'start_idx': 0,
-                    'end_idx': len(pose_data)
-                })
-            else:
-                # 训练模式: 分割成固定长度的序列
-                # 如果是跌倒视频,确保包含跌倒事件的片段被标记
-                has_fall = int(row['has_fall'])
-                
-                if has_fall == 1:
-                    # 获取跌倒开始和结束的帧索引
-                    fall_start = int(row['fall_start_frame']) if 'fall_start_frame' in row else 0
-                    fall_end = int(row['fall_end_frame']) if 'fall_end_frame' in row else len(pose_data)
+            has_fall = int(row['has_fall'])
+            
+            if has_fall == 0:
+                # 非跌倒视频: 使用较大的滑动步长(20)
+                for start_idx in range(0, total_frames - self.seq_length + 1, 20):
+                    end_idx = start_idx + self.seq_length
                     
-                    # 确保跌倒序列被完整捕捉
-                    # 从跌倒前的帧开始
-                    start_idx = max(0, fall_start - self.seq_length // 2)
-                    end_idx = min(len(pose_data), start_idx + self.seq_length)
-                    
-                    # 添加包含跌倒的序列(标签为1)
+                    # 如果剩余帧数不足一个完整序列,则跳过
+                    if end_idx > total_frames:
+                        break
+                        
                     self.samples.append({
                         'video_id': video_id,
                         'pose_file': npz_file,
-                        'label': 1,
+                        'label': 0,  # 非跌倒
                         'start_idx': start_idx,
                         'end_idx': end_idx
                     })
+            else:
+                # 跌倒视频: 使用较小的滑动步长(15)
+                fall_start = int(row['fall_start_frame'])
+                fall_end = int(row['fall_end_frame'])
+                fall_duration = fall_end - fall_start + 1
+                
+                for start_idx in range(0, total_frames - self.seq_length + 1, 15):
+                    end_idx = start_idx + self.seq_length
                     
-                    # 添加不包含跌倒的序列(标签为0)
-                    # 从视频开始部分选取
-                    if fall_start > self.seq_length:
-                        self.samples.append({
-                            'video_id': video_id,
-                            'pose_file': npz_file,
-                            'label': 0,
-                            'start_idx': 0,
-                            'end_idx': self.seq_length
-                        })
-                else:
-                    # 对于非跌倒视频,使用滑动窗口创建多个样本
-                    total_frames = len(pose_data)
+                    # 如果剩余帧数不足一个完整序列,则跳过
+                    if end_idx > total_frames:
+                        break
                     
-                    for start_idx in range(0, total_frames - self.seq_length + 1, self.stride):
-                        end_idx = start_idx + self.seq_length
+                    # 计算当前序列与跌倒帧段的重叠部分
+                    overlap_start = max(start_idx, fall_start)
+                    overlap_end = min(end_idx, fall_end)
+                    
+                    if overlap_end > overlap_start:
+                        # 存在重叠,计算重叠比例
+                        overlap_length = overlap_end - overlap_start + 1
+                        overlap_ratio = overlap_length / self.seq_length
                         
-                        self.samples.append({
-                            'video_id': video_id,
-                            'pose_file': npz_file,
-                            'label': 0,
-                            'start_idx': start_idx,
-                            'end_idx': end_idx
-                        })
-                        
-                        # 限制每个视频的非跌倒样本数量,防止类别不平衡
-                        if len(self.samples) % 5 == 0:
-                            break
+                        # 如果重叠比例超过30%,标记为跌倒
+                        is_fall = overlap_ratio >= 0.3
+                    else:
+                        # 无重叠
+                        is_fall = False
+                    
+                    self.samples.append({
+                        'video_id': video_id,
+                        'pose_file': npz_file,
+                        'label': int(is_fall),
+                        'start_idx': start_idx,
+                        'end_idx': end_idx,
+                        'overlap_ratio': overlap_ratio if overlap_end > overlap_start else 0
+                    })
+        
+        # 打印数据集统计信息
+        total_samples = len(self.samples)
+        fall_samples = sum(1 for sample in self.samples if sample['label'] == 1)
+        non_fall_samples = total_samples - fall_samples
+        
+        print(f"\n数据集统计信息:")
+        print(f"总样本数: {total_samples}")
+        print(f"跌倒样本数: {fall_samples}")
+        print(f"非跌倒样本数: {non_fall_samples}")
+        print(f"跌倒/非跌倒比例: {fall_samples/non_fall_samples:.2f}")
     
     def __len__(self):
         return len(self.samples)
@@ -497,16 +504,16 @@ def process_args():
     parser = argparse.ArgumentParser(description='跌倒检测模型训练')
     parser.add_argument('--data_dir', type=str, default='./demo/output/', help='3D姿态数据目录')
     parser.add_argument('--label_file', type=str, required=True, help='标签文件路径(CSV格式)')
-    parser.add_argument('--seq_length', type=int, default=60, help='序列长度')
-    parser.add_argument('--stride', type=int, default=30, help='滑动窗口步长')
+    parser.add_argument('--seq_length', type=int, default=30, help='序列长度')
+    parser.add_argument('--stride', type=int, default=15, help='滑动窗口步长')
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
     parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
-    parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
-    parser.add_argument('--num_layers', type=int, default=2, help='LSTM层数')
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout比例')
-    parser.add_argument('--save_dir', type=str, default='./checkpoints/fall_detection/', help='模型保存目录')
+    parser.add_argument('--hidden_dim', type=int, default=256, help='LSTM隐藏层维度')
+    parser.add_argument('--num_layers', type=int, default=3, help='LSTM层数')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout比例')
+    parser.add_argument('--save_dir', type=str, default='./checkpoints/fall_detection_lstm/', help='模型保存目录')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--test_only', action='store_true', help='仅测试模式')
