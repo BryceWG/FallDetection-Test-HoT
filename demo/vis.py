@@ -520,102 +520,109 @@ def process_single_video(video_path, args, start_time=None, total_videos=None, c
     """
     处理单个视频文件
     """
-    # 获取视频名称用于显示
-    video_name = os.path.basename(video_path)
-    
-    # 如果是批量处理，显示简化的进度信息
-    if total_videos:
-        print(f'\n[{current_video}/{total_videos}] 处理: {video_name}')
-    else:
-        print(f'\n处理视频: {video_name}')
-    
-    # 检查视频路径是否为绝对路径
-    if os.path.isabs(video_path):
-        actual_video_path = video_path
-    else:
-        actual_video_path = './demo/video/' + video_path
-    
-    # 检查视频文件是否存在
-    if not os.path.exists(actual_video_path):
-        print(f"错误: 视频文件不存在: {actual_video_path}")
-        return
+    try:
+        # 获取视频名称用于显示
+        video_name = os.path.basename(video_path)
         
-    # 使用视频文件名作为输出目录名
-    video_name = os.path.splitext(os.path.basename(actual_video_path))[0]
-    output_dir = './demo/output/' + video_name + '/'
-    
-    # 检查输出目录是否已存在
-    if os.path.exists(output_dir):
-        # 检查是否包含必要的处理结果
-        has_2d = os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz')
-        has_3d = os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz')
-        has_vis = os.path.exists(output_dir + 'pose/')
+        # 如果是批量处理，显示简化的进度信息
+        if total_videos:
+            print(f'\n[{current_video}/{total_videos}] 处理: {video_name}')
+        else:
+            print(f'\n处理视频: {video_name}')
         
-        # 根据参数检查是否需要跳过
-        should_skip = True
-        if args.extract_2d and not has_2d:
-            should_skip = False
-        if args.predict_3d and not has_3d:
-            should_skip = False
-        if args.gen_demo and not has_vis:
-            should_skip = False
+        # 检查视频路径是否为绝对路径
+        if os.path.isabs(video_path):
+            actual_video_path = video_path
+        else:
+            actual_video_path = './demo/video/' + video_path
+        
+        # 检查视频文件是否存在
+        if not os.path.exists(actual_video_path):
+            raise FileNotFoundError(f"视频文件不存在: {actual_video_path}")
             
-        if should_skip:
-            print(f'⏭️ 跳过已处理的视频: {video_name}')
-            return
-        else:
-            print(f'⚠️ 发现不完整的处理结果，继续处理: {video_name}')
-    
-    # 提取2D姿态
-    keypoints = None
-    if args.extract_2d:
-        keypoints = get_pose2D(actual_video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector, batch_size=args.batch_size)
-    
-    # 可视化2D姿态(完整或仅第一帧)
-    if args.vis_2d or args.vis_2d_first:
-        if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
-            print('⚠️ 未找到2D关键点')
-        else:
-            if args.vis_2d:
-                visualize_pose2D(actual_video_path, output_dir, keypoints)
-            if args.vis_2d_first:
-                visualize_pose2D_first_frame(actual_video_path, output_dir, keypoints)
-    
-    # 预测3D姿态
-    output_3d_all = None
-    if args.predict_3d:
-        if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
-            print('⚠️ 未找到2D关键点')
-        else:
-            output_3d_all = get_pose3D(actual_video_path, output_dir, args.fix_z)
-    
-    # 可视化3D姿态
-    if args.vis_3d:
-        if not os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz') and output_3d_all is None:
-            print('⚠️ 未找到3D关键点')
-        else:
-            visualize_pose3D(actual_video_path, output_dir, args.fix_z, output_3d_all)
-    
-    # 生成演示
-    if args.gen_demo:
-        if not os.path.exists(output_dir + 'pose2D/') or not os.path.exists(output_dir + 'pose3D/'):
-            print('⚠️ 未找到2D或3D姿态图像')
-        else:
-            generate_demo(output_dir)
-    
-    # 生成视频
-    if args.gen_video:
-        if not os.path.exists(output_dir + 'pose/'):
-            print('⚠️ 未找到演示图像')
-        else:
-            img2video(actual_video_path, output_dir)
-    
-    # 显示该视频的处理时间
-    if start_time:
-        current_time = time.time()
-        elapsed_time = current_time - start_time
-        minutes, seconds = divmod(elapsed_time, 60)
-        print(f'✓ 完成处理 [{int(minutes)}分{seconds:.1f}秒]')
+        # 使用视频文件名作为输出目录名
+        video_name = os.path.splitext(os.path.basename(actual_video_path))[0]
+        output_dir = './demo/output/' + video_name + '/'
+        
+        # 检查输出目录是否已存在
+        if os.path.exists(output_dir):
+            # 检查是否包含必要的处理结果
+            has_2d = os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz')
+            has_3d = os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz')
+            has_vis = os.path.exists(output_dir + 'pose/')
+            
+            # 根据参数检查是否需要跳过
+            should_skip = True
+            if args.extract_2d and not has_2d:
+                should_skip = False
+            if args.predict_3d and not has_3d:
+                should_skip = False
+            if args.gen_demo and not has_vis:
+                should_skip = False
+                
+            if should_skip:
+                print(f'⏭️ 跳过已处理的视频: {video_name}')
+                return True
+            else:
+                print(f'⚠️ 发现不完整的处理结果，继续处理: {video_name}')
+        
+        # 提取2D姿态
+        keypoints = None
+        if args.extract_2d:
+            keypoints = get_pose2D(actual_video_path, output_dir, save_json=getattr(args, '2d_json', False), detector=args.detector, batch_size=args.batch_size)
+        
+        # 可视化2D姿态(完整或仅第一帧)
+        if args.vis_2d or args.vis_2d_first:
+            if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
+                print('⚠️ 未找到2D关键点')
+            else:
+                if args.vis_2d:
+                    visualize_pose2D(actual_video_path, output_dir, keypoints)
+                if args.vis_2d_first:
+                    visualize_pose2D_first_frame(actual_video_path, output_dir, keypoints)
+        
+        # 预测3D姿态
+        output_3d_all = None
+        if args.predict_3d:
+            if not os.path.exists(output_dir + 'input_2D/input_keypoints_2d.npz') and keypoints is None:
+                print('⚠️ 未找到2D关键点')
+            else:
+                output_3d_all = get_pose3D(actual_video_path, output_dir, args.fix_z)
+        
+        # 可视化3D姿态
+        if args.vis_3d:
+            if not os.path.exists(output_dir + 'output_3D/output_keypoints_3d.npz') and output_3d_all is None:
+                print('⚠️ 未找到3D关键点')
+            else:
+                visualize_pose3D(actual_video_path, output_dir, args.fix_z, output_3d_all)
+        
+        # 生成演示
+        if args.gen_demo:
+            if not os.path.exists(output_dir + 'pose2D/') or not os.path.exists(output_dir + 'pose3D/'):
+                print('⚠️ 未找到2D或3D姿态图像')
+            else:
+                generate_demo(output_dir)
+        
+        # 生成视频
+        if args.gen_video:
+            if not os.path.exists(output_dir + 'pose/'):
+                print('⚠️ 未找到演示图像')
+            else:
+                img2video(actual_video_path, output_dir)
+        
+        # 显示该视频的处理时间
+        if start_time:
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            minutes, seconds = divmod(elapsed_time, 60)
+            print(f'✓ 完成处理 [{int(minutes)}分{seconds:.1f}秒]')
+        
+        return True
+        
+    except Exception as e:
+        print(f'❌ 处理视频 {os.path.basename(video_path)} 时出错:')
+        print(f'   错误信息: {str(e)}')
+        return False
 
 
 if __name__ == "__main__":
@@ -633,6 +640,11 @@ if __name__ == "__main__":
     
     # 开始计时
     start_time = time.time()
+    
+    # 记录处理结果
+    success_count = 0
+    error_count = 0
+    skipped_count = 0
 
     # 处理单个视频或批量处理视频
     if args.video_dir:
@@ -652,17 +664,32 @@ if __name__ == "__main__":
         
         # 批量处理视频
         for i, video_path in enumerate(video_files, 1):
-            process_single_video(video_path, args, start_time, total_videos, i)
+            result = process_single_video(video_path, args, start_time, total_videos, i)
+            if result is True:
+                success_count += 1
+            else:
+                error_count += 1
     else:
         # 处理单个视频
         video_path = args.video
-        process_single_video(video_path, args, start_time)
+        result = process_single_video(video_path, args, start_time)
+        if result is True:
+            success_count += 1
+        else:
+            error_count += 1
     
     # 计算总耗时
     end_time = time.time()
     total_time = end_time - start_time
     minutes, seconds = divmod(total_time, 60)
-    print(f'\n总耗时: {int(minutes)}分{seconds:.1f}秒')
+    
+    # 显示处理统计信息
+    print('\n处理统计:')
+    if args.video_dir:
+        print(f'总计视频: {total_videos} 个')
+        print(f'成功处理: {success_count} 个')
+        print(f'处理失败: {error_count} 个')
+    print(f'总耗时: {int(minutes)}分{seconds:.1f}秒')
     
     if args.all:
         print('✓ 所有步骤执行完成!')
