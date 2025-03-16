@@ -385,27 +385,27 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
 def plot_training_history(history, save_dir):
     """
-    绘制训练历史曲线
+    Plot training history curves
     """
     plt.figure(figsize=(12, 5))
     
-    # 损失曲线
+    # Loss curves
     plt.subplot(1, 2, 1)
-    plt.plot(history['train_losses'], label='训练损失')
-    plt.plot(history['val_losses'], label='验证损失')
+    plt.plot(history['train_losses'], label='Training Loss')
+    plt.plot(history['val_losses'], label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('训练和验证损失')
+    plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
     
-    # 准确率曲线
+    # Accuracy curves
     plt.subplot(1, 2, 2)
-    plt.plot(history['train_accs'], label='训练准确率')
-    plt.plot(history['val_accs'], label='验证准确率')
+    plt.plot(history['train_accs'], label='Training Accuracy')
+    plt.plot(history['val_accs'], label='Validation Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
-    plt.title('训练和验证准确率')
+    plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
     
@@ -416,7 +416,7 @@ def plot_training_history(history, save_dir):
 
 def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoints/fall_detection'):
     """
-    评估模型
+    Evaluate model
     """
     model.eval()
     test_loss = 0.0
@@ -430,11 +430,11 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
             labels = batch['label'].to(device)
             video_ids = batch['video_id']
             
-            # 前向传播
+            # Forward pass
             outputs = model(sequences)
             loss = criterion(outputs, labels)
             
-            # 统计
+            # Statistics
             test_loss += loss.item() * sequences.size(0)
             pred = (outputs >= 0.5).float()
             
@@ -442,18 +442,18 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
             test_labels.extend(labels.cpu().numpy())
             test_videos.extend(video_ids)
     
-    # 计算平均损失
+    # Calculate average loss
     test_loss = test_loss / len(test_loader.dataset)
     
-    # 二值化预测结果
+    # Binarize predictions
     binary_preds = (np.array(test_preds) >= 0.5).astype(int)
     true_labels = np.array(test_labels).astype(int)
     
-    # 计算性能指标
+    # Calculate performance metrics
     classification_rep = classification_report(true_labels, binary_preds, output_dict=True)
     conf_matrix = confusion_matrix(true_labels, binary_preds)
     
-    # 保存结果
+    # Save results
     results = {
         'test_loss': test_loss,
         'predictions': test_preds,
@@ -467,25 +467,25 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
     with open(os.path.join(save_dir, 'evaluation_results.pkl'), 'wb') as f:
         pickle.dump(results, f)
     
-    # 打印评估结果
-    print(f"测试损失: {test_loss:.4f}")
-    print("\n分类报告:")
+    # Print evaluation results
+    print(f"Test Loss: {test_loss:.4f}")
+    print("\nClassification Report:")
     print(classification_report(true_labels, binary_preds))
-    print("\n混淆矩阵:")
+    print("\nConfusion Matrix:")
     print(conf_matrix)
     
-    # 绘制混淆矩阵
+    # Plot confusion matrix
     plt.figure(figsize=(8, 6))
     plt.imshow(conf_matrix, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.title('混淆矩阵')
+    plt.title('Confusion Matrix')
     plt.colorbar()
     
-    class_names = ['正常', '跌倒']
+    class_names = ['Normal', 'Fall']
     tick_marks = np.arange(len(class_names))
     plt.xticks(tick_marks, class_names)
     plt.yticks(tick_marks, class_names)
     
-    # 在格子中显示数字
+    # Show numbers in cells
     thresh = conf_matrix.max() / 2.
     for i in range(conf_matrix.shape[0]):
         for j in range(conf_matrix.shape[1]):
@@ -494,8 +494,8 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
                     color="white" if conf_matrix[i, j] > thresh else "black")
     
     plt.tight_layout()
-    plt.ylabel('真实标签')
-    plt.xlabel('预测标签')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
     plt.savefig(os.path.join(save_dir, 'confusion_matrix.png'))
     plt.close()
     
@@ -527,7 +527,7 @@ def process_args():
     parser.add_argument('--hidden_dim', type=int, default=256, help='LSTM隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=3, help='LSTM层数')
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout比例')
-    parser.add_argument('--save_dir', type=str, default='./checkpoints/fall_detection_lstm/', help='模型保存目录')
+    parser.add_argument('--save_dir', type=str, default='./checkpoint/fall_detection_lstm/', help='模型保存目录')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--test_only', action='store_true', help='仅测试模式')
