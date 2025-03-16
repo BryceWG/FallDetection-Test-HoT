@@ -547,6 +547,75 @@ def process_args():
     return args
 
 
+def save_training_summary(args, train_results, test_results, save_dir):
+    """
+    保存训练参数和结果摘要为JSON格式
+    
+    Args:
+        args: 训练参数
+        train_results: 训练过程中的最佳结果
+        test_results: 测试集评估结果
+        save_dir: 保存目录
+    """
+    # 提取需要保存的参数
+    params = {
+        "data_params": {
+            "data_dir": args.data_dir,
+            "normal_seq_length": args.normal_seq_length,
+            "normal_stride": args.normal_stride,
+            "fall_seq_length": args.fall_seq_length,
+            "fall_stride": args.fall_stride,
+            "overlap_threshold": args.overlap_threshold,
+            "test_ratio": args.test_ratio,
+            "val_ratio": args.val_ratio
+        },
+        "model_params": {
+            "hidden_dim": args.hidden_dim,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout
+        },
+        "train_params": {
+            "batch_size": args.batch_size,
+            "num_epochs": args.num_epochs,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "seed": args.seed
+        }
+    }
+    
+    # 提取训练结果
+    train_summary = {
+        "best_val_loss": float(train_results["val_loss"]),
+        "best_val_accuracy": float(train_results["val_acc"]),
+        "best_epoch": train_results["epoch"]
+    }
+    
+    # 提取测试结果
+    test_summary = {
+        "test_loss": float(test_results["test_loss"]),
+        "classification_report": {
+            k: v for k, v in test_results["classification_report"].items()
+            if k in ["0", "1", "accuracy", "macro avg", "weighted avg"]
+        }
+    }
+    
+    # 合并所有信息
+    summary = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "parameters": params,
+        "training_results": train_summary,
+        "test_results": test_summary
+    }
+    
+    # 保存为JSON文件
+    summary_file = os.path.join(save_dir, "training_summary.json")
+    with open(summary_file, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=4, ensure_ascii=False)
+    
+    print(f"\n训练摘要已保存至: {summary_file}")
+    return summary
+
+
 def main():
     """
     主函数
@@ -577,6 +646,9 @@ def main():
         print(f"错误: 数据目录不存在 - {args.data_dir}")
         return
     
+    # 创建保存目录
+    os.makedirs(args.save_dir, exist_ok=True)
+    
     # 创建数据集和加载器
     print("创建数据集...")
     full_dataset = PoseSequenceDataset(
@@ -602,7 +674,7 @@ def main():
     # 划分训练集和验证集
     train_indices, val_indices = train_test_split(
         train_indices,
-        test_size=args.val_ratio,  # 验证集占训练数据的比例
+        test_size=args.val_ratio,
         stratify=[full_dataset[i]['label'].item() for i in train_indices],
         random_state=args.seed
     )
@@ -659,7 +731,15 @@ def main():
             return
         
         print("开始模型评估...")
-        results = evaluate_model(model, test_loader, criterion, device, args.save_dir)
+        test_results = evaluate_model(model, test_loader, criterion, device, args.save_dir)
+        
+        # 保存测试结果摘要
+        summary = save_training_summary(
+            args=args,
+            train_results={"val_loss": float('inf'), "val_acc": 0.0, "epoch": 0},
+            test_results=test_results,
+            save_dir=args.save_dir
+        )
         print("评估完成!")
         return
     
@@ -678,12 +758,31 @@ def main():
     )
     print("训练完成!")
     
+    # 加载最佳模型进行测试
+    best_model_path = os.path.join(args.save_dir, 'best_model.pth')
+    if os.path.exists(best_model_path):
+        checkpoint = torch.load(best_model_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        best_val_results = {
+            "val_loss": checkpoint['val_loss'],
+            "val_acc": checkpoint['val_acc'],
+            "epoch": checkpoint['epoch']
+        }
+    
     # 评估模型
     print("开始模型评估...")
-    results = evaluate_model(model, test_loader, criterion, device, args.save_dir)
+    test_results = evaluate_model(model, test_loader, criterion, device, args.save_dir)
+    
+    # 保存训练摘要
+    summary = save_training_summary(
+        args=args,
+        train_results=best_val_results,
+        test_results=test_results,
+        save_dir=args.save_dir
+    )
     print("评估完成!")
     
-    return model, history, results
+    return model, history, test_results, summary
     
 
 if __name__ == "__main__":
