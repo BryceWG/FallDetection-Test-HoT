@@ -88,10 +88,15 @@ class PoseSequenceDataset(Dataset):
     姿态序列数据集
     加载3D姿态数据和对应的标签
     """
-    def __init__(self, data_dir, label_file, seq_length=60, stride=30, transform=None, test_mode=False):
+    def __init__(self, data_dir, label_file, normal_seq_length=30, normal_stride=20,
+                 fall_seq_length=30, fall_stride=15, overlap_threshold=0.3,
+                 transform=None, test_mode=False):
         self.data_dir = data_dir
-        self.seq_length = seq_length
-        self.stride = stride
+        self.normal_seq_length = normal_seq_length
+        self.normal_stride = normal_stride
+        self.fall_seq_length = fall_seq_length
+        self.fall_stride = fall_stride
+        self.overlap_threshold = overlap_threshold
         self.transform = transform
         self.test_mode = test_mode
         
@@ -104,8 +109,8 @@ class PoseSequenceDataset(Dataset):
     def _create_sequence_samples(self):
         """
         创建序列样本索引
-        - 非跌倒视频: 序列长度30帧,滑动步长20,全部标记为非跌倒(0)
-        - 跌倒视频: 序列长度30帧,滑动步长15,根据与跌倒帧段重叠比例判断标签
+        - 非跌倒视频: 使用normal_seq_length和normal_stride
+        - 跌倒视频: 使用fall_seq_length和fall_stride,根据overlap_threshold判断标签
         """
         self.samples = []
         
@@ -125,9 +130,9 @@ class PoseSequenceDataset(Dataset):
             has_fall = int(row['has_fall'])
             
             if has_fall == 0:
-                # 非跌倒视频: 使用较大的滑动步长(20)
-                for start_idx in range(0, total_frames - self.seq_length + 1, 20):
-                    end_idx = start_idx + self.seq_length
+                # 非跌倒视频: 使用normal_stride
+                for start_idx in range(0, total_frames - self.normal_seq_length + 1, self.normal_stride):
+                    end_idx = start_idx + self.normal_seq_length
                     
                     # 如果剩余帧数不足一个完整序列,则跳过
                     if end_idx > total_frames:
@@ -141,13 +146,13 @@ class PoseSequenceDataset(Dataset):
                         'end_idx': end_idx
                     })
             else:
-                # 跌倒视频: 使用较小的滑动步长(15)
+                # 跌倒视频: 使用fall_stride
                 fall_start = int(row['fall_start_frame'])
                 fall_end = int(row['fall_end_frame'])
                 fall_duration = fall_end - fall_start + 1
                 
-                for start_idx in range(0, total_frames - self.seq_length + 1, 15):
-                    end_idx = start_idx + self.seq_length
+                for start_idx in range(0, total_frames - self.fall_seq_length + 1, self.fall_stride):
+                    end_idx = start_idx + self.fall_seq_length
                     
                     # 如果剩余帧数不足一个完整序列,则跳过
                     if end_idx > total_frames:
@@ -160,10 +165,10 @@ class PoseSequenceDataset(Dataset):
                     if overlap_end > overlap_start:
                         # 存在重叠,计算重叠比例
                         overlap_length = overlap_end - overlap_start + 1
-                        overlap_ratio = overlap_length / self.seq_length
+                        overlap_ratio = overlap_length / self.fall_seq_length
                         
-                        # 如果重叠比例超过30%,标记为跌倒
-                        is_fall = overlap_ratio >= 0.3
+                        # 根据overlap_threshold判断是否为跌倒
+                        is_fall = overlap_ratio >= self.overlap_threshold
                     else:
                         # 无重叠
                         is_fall = False
@@ -202,9 +207,9 @@ class PoseSequenceDataset(Dataset):
         end_idx = sample['end_idx']
         
         # 确保序列长度一致
-        if end_idx - start_idx < self.seq_length:
+        if end_idx - start_idx < self.normal_seq_length:
             # 如果序列不够长,进行填充
-            padding_length = self.seq_length - (end_idx - start_idx)
+            padding_length = self.normal_seq_length - (end_idx - start_idx)
             sequence = pose_data[start_idx:end_idx]
             
             # 通过重复最后一帧进行填充
@@ -212,13 +217,13 @@ class PoseSequenceDataset(Dataset):
             sequence = np.concatenate([sequence, last_frame], axis=0)
         else:
             # 如果序列足够长,直接截取指定长度
-            sequence = pose_data[start_idx:start_idx + self.seq_length]
+            sequence = pose_data[start_idx:start_idx + self.normal_seq_length]
         
         # 展平每一帧的关键点数据
         # 原始形状: [seq_len, num_joints, 3]
         # 转换为: [seq_len, num_joints * 3]
         num_joints = sequence.shape[1]
-        flattened_sequence = sequence.reshape(self.seq_length, -1)
+        flattened_sequence = sequence.reshape(self.normal_seq_length, -1)
         
         # 特征标准化
         if self.transform:
@@ -503,9 +508,18 @@ def process_args():
     """
     parser = argparse.ArgumentParser(description='跌倒检测模型训练')
     parser.add_argument('--data_dir', type=str, default='./demo/output/', help='3D姿态数据目录')
-    parser.add_argument('--label_file', type=str, required=True, help='标签文件路径(CSV格式)')
-    parser.add_argument('--seq_length', type=int, default=30, help='序列长度')
-    parser.add_argument('--stride', type=int, default=15, help='滑动窗口步长')
+    parser.add_argument('--label_file', type=str, required=False, help='标签文件路径(CSV格式)')
+    
+    # 非跌倒视频的序列参数
+    parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
+    parser.add_argument('--normal_stride', type=int, default=20, help='非跌倒视频滑动步长')
+    
+    # 跌倒视频的序列参数
+    parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
+    parser.add_argument('--fall_stride', type=int, default=15, help='跌倒视频滑动步长')
+    parser.add_argument('--overlap_threshold', type=float, default=0.3, help='跌倒判定的重叠比例阈值')
+    
+    # 其他原有参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
     parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
@@ -558,8 +572,11 @@ def main():
     full_dataset = PoseSequenceDataset(
         data_dir=args.data_dir,
         label_file=args.label_file,
-        seq_length=args.seq_length,
-        stride=args.stride
+        normal_seq_length=args.normal_seq_length,
+        normal_stride=args.normal_stride,
+        fall_seq_length=args.fall_seq_length,
+        fall_stride=args.fall_stride,
+        overlap_threshold=args.overlap_threshold
     )
     
     print(f"数据集大小: {len(full_dataset)}")
