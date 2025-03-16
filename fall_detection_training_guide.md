@@ -57,16 +57,19 @@ sample_video2,0,,
 |------|------|--------|------|
 | `--data_dir` | str | `./demo/output/` | 3D姿态数据目录 |
 | `--label_file` | str | (必需) | 标签文件路径(CSV格式) |
-| `--seq_length` | int | 60 | 序列长度 |
-| `--stride` | int | 30 | 滑动窗口步长 |
+| `--normal_seq_length` | int | 30 | 非跌倒视频序列长度 |
+| `--normal_stride` | int | 20 | 非跌倒视频滑动步长 |
+| `--fall_seq_length` | int | 30 | 跌倒视频序列长度 |
+| `--fall_stride` | int | 15 | 跌倒视频滑动步长 |
+| `--overlap_threshold` | float | 0.3 | 跌倒判定的重叠比例阈值 |
 | `--batch_size` | int | 16 | 批大小 |
 | `--num_epochs` | int | 50 | 训练轮数 |
 | `--learning_rate` | float | 0.001 | 学习率 |
 | `--weight_decay` | float | 1e-5 | 权重衰减 |
-| `--hidden_dim` | int | 128 | LSTM隐藏层维度 |
-| `--num_layers` | int | 2 | LSTM层数 |
-| `--dropout` | float | 0.2 | Dropout比例 |
-| `--save_dir` | str | `./checkpoints/fall_detection/` | 模型保存目录 |
+| `--hidden_dim` | int | 256 | LSTM隐藏层维度 |
+| `--num_layers` | int | 3 | LSTM层数 |
+| `--dropout` | float | 0.3 | Dropout比例 |
+| `--save_dir` | str | `./checkpoints/fall_detection_lstm/` | 模型保存目录 |
 | `--gpu` | str | '0' | GPU ID |
 | `--seed` | int | 42 | 随机种子 |
 | `--test_only` | flag | False | 仅测试模式 |
@@ -77,25 +80,39 @@ sample_video2,0,,
 基础训练命令：
 
 ```bash
-python train_fall_detection.py --label_file path/to/labels.csv
+python train_lstm.py --label_file fall_frame_data.csv
 ```
 
 使用自定义参数：
 
 ```bash
-python train_fall_detection.py --label_file path/to/labels.csv --data_dir path/to/data \
-                               --seq_length 90 --stride 45 --batch_size 32 \
-                               --num_epochs 100 --learning_rate 0.0005 \
-                               --hidden_dim 256 --num_layers 3 --dropout 0.3 \
-                               --save_dir ./my_models/fall_detection/
+python train_lstm.py --label_file fall_frame_data.csv --data_dir ./demo/output/ \
+                    --normal_seq_length 30 --normal_stride 20 \
+                    --fall_seq_length 30 --fall_stride 15 \
+                    --overlap_threshold 0.3 \
+                    --batch_size 8 --num_epochs 100 \
+                    --learning_rate 0.0005 --hidden_dim 256 \
+                    --num_layers 3 --dropout 0.3 \
+                    --save_dir ./my_models/fall_detection/
 ```
 
-从已有检查点继续训练：
+### 数据集生成策略
 
-```bash
-python train_fall_detection.py --label_file path/to/labels.csv \
-                               --checkpoint ./checkpoints/fall_detection/model_epoch_30.pth
-```
+数据集生成采用了两种不同的策略：
+
+1. **非跌倒视频序列生成**：
+   - 使用固定序列长度(`normal_seq_length`)
+   - 使用较大的滑动步长(`normal_stride`)
+   - 生成的所有序列样本均标记为非跌倒(0)
+
+2. **跌倒视频序列生成**：
+   - 使用固定序列长度(`fall_seq_length`)
+   - 使用较小的滑动步长(`fall_stride`)
+   - 根据重叠比例判断是否为跌倒序列：
+     - 计算当前序列窗口与跌倒帧段的重叠长度
+     - 计算重叠比例 = 重叠长度 / 序列长度
+     - 只有当重叠比例 ≥ `overlap_threshold` 时才标记为跌倒样本(1)
+     - 这样可以避免边缘效应带来的错误标记
 
 ### 训练过程
 
