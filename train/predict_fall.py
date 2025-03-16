@@ -1,13 +1,39 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# python train/predict_fall.py --model_path checkpoint\fall_detection_lstm\best_model.pth --pose_file demo\output\experiment_video_knock-down-back_side_0924160538_019_sd3-split\output_3D\output_keypoints_3d.npz --use_training_params
 import os
 import sys
+import json
 import torch
 import argparse
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from train_lstm import FallDetectionLSTM
+
+def load_training_params(model_path):
+    """
+    从model_path同级目录下的training_summary.json加载训练参数
+    
+    参数:
+        model_path: 模型文件路径
+        
+    返回:
+        加载的参数字典,如果文件不存在则返回None
+    """
+    json_path = os.path.join(os.path.dirname(model_path), 'training_summary.json')
+    if not os.path.exists(json_path):
+        print(f"注意: 未找到训练参数文件 {json_path}, 将使用命令行参数")
+        return None
+        
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            params = json.load(f)
+        print(f"已加载训练参数文件: {json_path}")
+        return params
+    except Exception as e:
+        print(f"警告: 加载训练参数文件失败: {str(e)}")
+        return None
 
 class FallPredictor:
     """
@@ -188,8 +214,37 @@ def process_args():
                       help='结果保存目录')
     parser.add_argument('--gpu', type=str, default='0',
                       help='GPU ID')
+    parser.add_argument('--use_training_params', action='store_true',
+                      help='是否使用training_summary.json中的训练参数')
     
     args = parser.parse_args()
+    
+    # 如果指定了使用训练参数,则尝试加载
+    if args.use_training_params:
+        training_params = load_training_params(args.model_path)
+        if training_params and 'parameters' in training_params:
+            params = training_params['parameters']
+            
+            # 更新模型参数
+            if 'model_params' in params:
+                model_params = params['model_params']
+                args.hidden_dim = model_params.get('hidden_dim', args.hidden_dim)
+                args.num_layers = model_params.get('num_layers', args.num_layers)
+                args.dropout = model_params.get('dropout', args.dropout)
+                print("\n使用训练时的模型参数:")
+                print(f"hidden_dim: {args.hidden_dim}")
+                print(f"num_layers: {args.num_layers}")
+                print(f"dropout: {args.dropout}")
+            
+            # 更新数据处理参数
+            if 'data_params' in params:
+                data_params = params['data_params']
+                args.window_size = data_params.get('fall_seq_length', args.window_size)
+                args.stride = data_params.get('fall_stride', args.stride)
+                print("\n使用训练时的数据处理参数:")
+                print(f"window_size: {args.window_size}")
+                print(f"stride: {args.stride}")
+    
     return args
 
 
@@ -240,7 +295,12 @@ def main():
             'pose_file': args.pose_file,
             'threshold': args.threshold,
             'window_size': args.window_size,
-            'stride': args.stride
+            'stride': args.stride,
+            'model_params': {
+                'hidden_dim': args.hidden_dim,
+                'num_layers': args.num_layers,
+                'dropout': args.dropout
+            }
         }
         
         # 保存为npz格式
