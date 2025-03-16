@@ -18,6 +18,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 sys.path.append(os.getcwd())
 
@@ -524,10 +525,15 @@ def process_args():
     parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='LSTM隐藏层维度')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=3, help='LSTM层数')
-    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout比例')
-    parser.add_argument('--save_dir', type=str, default='./checkpoint/fall_detection_lstm/', help='模型保存目录')
+    parser.add_argument('--dropout', type=float, default=0.4, help='Dropout比例')
+    
+    # 生成带时间戳的保存目录
+    timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
+    default_save_dir = f'./checkpoint/fall_detection_lstm/{timestamp}'
+    
+    parser.add_argument('--save_dir', type=str, default=default_save_dir, help='模型保存目录')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--test_only', action='store_true', help='仅测试模式')
