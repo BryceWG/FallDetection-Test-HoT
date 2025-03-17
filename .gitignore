@@ -18,6 +18,7 @@
 *.jsonl.tar.gz
 .github
 *.pkl
+*.csv
 
 # windsurf rules
 .windsurfrules
