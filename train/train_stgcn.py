@@ -558,21 +558,21 @@ def plot_training_history(history, save_dir):
     
     # Loss curves
     plt.subplot(1, 2, 1)
-    plt.plot(history['train_losses'], label='训练损失')
-    plt.plot(history['val_losses'], label='验证损失')
+    plt.plot(history['train_losses'], label='Training Loss')
+    plt.plot(history['val_losses'], label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('训练和验证损失')
+    plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
     
     # Accuracy curves
     plt.subplot(1, 2, 2)
-    plt.plot(history['train_accs'], label='训练准确率')
-    plt.plot(history['val_accs'], label='验证准确率')
+    plt.plot(history['train_accs'], label='Training Accuracy')
+    plt.plot(history['val_accs'], label='Validation Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
-    plt.title('训练和验证准确率')
+    plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
     
@@ -644,10 +644,10 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
     # 绘制混淆矩阵
     plt.figure(figsize=(8, 6))
     plt.imshow(conf_matrix, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.title('混淆矩阵')
+    plt.title('Confusion Matrix')
     plt.colorbar()
     
-    class_names = ['正常', '跌倒']
+    class_names = ['Normal', 'Fall']
     tick_marks = np.arange(len(class_names))
     plt.xticks(tick_marks, class_names)
     plt.yticks(tick_marks, class_names)
@@ -661,8 +661,8 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
                     color="white" if conf_matrix[i, j] > thresh else "black")
     
     plt.tight_layout()
-    plt.ylabel('真实标签')
-    plt.xlabel('预测标签')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
     plt.savefig(os.path.join(save_dir, 'confusion_matrix.png'))
     plt.close()
     
@@ -679,24 +679,24 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=40, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=35, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
     parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
-    parser.add_argument('--overlap_threshold', type=float, default=0.5, help='跌倒判定的重叠比例阈值')
+    parser.add_argument('--overlap_threshold', type=float, default=0.35, help='跌倒判定的重叠比例阈值')
     
     # 数据集划分参数
     parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
-    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.2, help='验证集占训练数据的比例')
     
     # ST-GCN特有参数
-    parser.add_argument('--hidden_dim', type=int, default=128, help='GCN隐藏层维度')
+    parser.add_argument('--hidden_dim', type=int, default=96, help='GCN隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=2, help='ST-GCN层数')
     
     # 其他训练参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
-    parser.add_argument('--num_epochs', type=int, default=40, help='训练轮数')
+    parser.add_argument('--num_epochs', type=int, default=30, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=5e-6, help='权重衰减')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
