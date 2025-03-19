@@ -156,6 +156,56 @@ class FallPredictor:
         
         return predictions, fall_windows
     
+    def predict_sequence(self, sequence_data):
+        """
+        预测单个序列的跌倒概率
+        
+        参数:
+            sequence_data: 单个序列的3D姿态数据
+            
+        返回:
+            跌倒概率 (0-1之间的浮点数)
+        """
+        # 数据预处理
+        pose_data = self._preprocess_sequence(sequence_data)
+        
+        # 转换为tensor
+        pose_tensor = torch.FloatTensor(pose_data).unsqueeze(0)  # 添加batch维度
+        pose_tensor = pose_tensor.to(self.device)
+        
+        # 预测
+        self.model.eval()
+        with torch.no_grad():
+            output = self.model(pose_tensor)
+            probability = output.item()
+            
+        return probability
+        
+    def _preprocess_sequence(self, sequence_data):
+        """
+        预处理单个序列数据
+        
+        参数:
+            sequence_data: 原始3D姿态序列数据
+            
+        返回:
+            预处理后的数据
+        """
+        # 转换为numpy数组
+        pose_data = np.array(sequence_data)
+        
+        # 确保数据形状正确
+        if len(pose_data.shape) == 4:  # [seq_len, num_people, num_joints, 3]
+            # 选择第一个人的数据
+            pose_data = pose_data[:, 0]  # [seq_len, num_joints, 3]
+            
+        # 重塑为2D数组 [seq_len, num_joints * 3]
+        if len(pose_data.shape) == 3:
+            seq_len, num_joints, _ = pose_data.shape
+            pose_data = pose_data.reshape(seq_len, -1)
+            
+        return pose_data
+
     def visualize_predictions(self, predictions, save_path=None):
         """
         可视化预测结果
@@ -338,4 +388,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

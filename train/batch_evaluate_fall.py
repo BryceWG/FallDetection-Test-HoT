@@ -46,88 +46,53 @@ class BatchFallEvaluator:
         返回:
             评估结果字典
         """
-        # 获取预测结果
-        predictions, fall_windows = self.predictor.predict(
-            pose_data, 
-            threshold=self.threshold,
-            window_size=self.window_size,
-            stride=self.stride
-        )
+        sequence_results = []
+        sequence_labels = []
         
-        # 生成帧级别的标签和预测
+        # 根据是否为跌倒序列选择不同的窗口参数
+        seq_length = self.window_size
+        stride = self.stride if has_fall else self.stride * 2  # 非跌倒视频使用更大的步长
+        
+        # 遍历视频帧,生成序列
         total_frames = len(pose_data)
-        frame_labels = np.zeros(total_frames)
-        frame_predictions = np.zeros(total_frames)
-        
-        # 设置真实标签
-        if has_fall and true_start is not None and true_end is not None:
-            # 确保索引是整数
-            start_idx = int(true_start)
-            end_idx = int(true_end)
-            if 0 <= start_idx < total_frames and 0 <= end_idx < total_frames:
-                frame_labels[start_idx:end_idx+1] = 1
+        for start_idx in range(0, total_frames - seq_length + 1, stride):
+            end_idx = start_idx + seq_length
             
-        # 设置预测标签
-        for pred in predictions:
-            start_frame = int(pred['start_frame'])
-            end_frame = int(pred['end_frame'])
-            if 0 <= start_frame < total_frames and 0 <= end_frame < total_frames:
-                is_fall = 1 if pred['probability'] >= self.threshold else 0
-                frame_predictions[start_frame:end_frame] = is_fall
+            # 如果剩余帧数不足一个完整序列,则跳过
+            if end_idx > total_frames:
+                break
+                
+            # 判断当前序列是否为跌倒序列
+            if has_fall and true_start is not None and true_end is not None:
+                # 计算序列与跌倒区间的重叠比例
+                overlap_start = max(start_idx, true_start)
+                overlap_end = min(end_idx, true_end)
+                if overlap_end > overlap_start:
+                    overlap_ratio = (overlap_end - overlap_start) / seq_length
+                    is_fall_seq = overlap_ratio >= 0.3  # 使用与训练时相同的阈值
+                else:
+                    is_fall_seq = False
+            else:
+                is_fall_seq = False
+                
+            # 获取当前序列的预测结果
+            sequence_data = pose_data[start_idx:end_idx]
+            pred_prob = self.predictor.predict_sequence(sequence_data)
+            
+            sequence_results.append({
+                'start_frame': start_idx,
+                'end_frame': end_idx,
+                'probability': float(pred_prob),
+                'is_fall': int(pred_prob >= self.threshold)
+            })
+            sequence_labels.append(int(is_fall_seq))
             
         return {
-            'predictions': predictions,
-            'fall_windows': fall_windows,
-            'frame_labels': frame_labels,
-            'frame_predictions': frame_predictions
+            'predictions': sequence_results,
+            'labels': sequence_labels,
+            'fall_windows': [pred for pred in sequence_results if pred['is_fall']]
         }
         
-    def find_optimal_threshold(self, all_frame_labels, all_predictions, thresholds=None):
-        """
-        寻找最优的分类阈值
-        
-        参数:
-            all_frame_labels: 真实标签数组
-            all_predictions: 预测概率数组
-            thresholds: 要评估的阈值列表，如果为None则自动生成
-            
-        返回:
-            最优阈值和对应的评估结果
-        """
-        if thresholds is None:
-            thresholds = np.arange(0.1, 1.0, 0.05)
-            
-        best_threshold = 0.5
-        best_accuracy = 0
-        best_results = None
-        
-        print("\n开始寻找最优阈值...")
-        for threshold in tqdm(thresholds, desc="评估阈值"):
-            # 使用当前阈值进行分类
-            binary_preds = (np.array(all_predictions) >= threshold).astype(int)
-            
-            # 计算性能指标
-            classification_rep = classification_report(all_frame_labels, binary_preds, output_dict=True)
-            conf_matrix = confusion_matrix(all_frame_labels, binary_preds)
-            
-            # 获取当前准确率
-            current_accuracy = classification_rep['accuracy']
-            
-            if current_accuracy > best_accuracy:
-                best_accuracy = current_accuracy
-                best_threshold = threshold
-                best_results = {
-                    'threshold': threshold,
-                    'accuracy': current_accuracy,
-                    'classification_report': classification_rep,
-                    'confusion_matrix': conf_matrix
-                }
-                
-        print(f"\n找到最优阈值: {best_threshold:.3f}")
-        print(f"最佳准确率: {best_accuracy:.4f}")
-        
-        return best_results
-
     def evaluate_dataset(self, csv_file, base_pose_dir):
         """
         评估整个数据集
@@ -142,10 +107,12 @@ class BatchFallEvaluator:
         # 读取CSV文件
         df = pd.read_csv(csv_file)
         
-        all_frame_labels = []
-        all_frame_predictions = []
-        all_frame_probabilities = []  # 存储原始预测概率
-        results = []
+        video_results = []
+        all_video_labels = []
+        all_video_predictions = []
+        all_sequence_labels = []
+        all_sequence_predictions = []
+        all_sequence_probabilities = []
         
         # 遍历每个视频
         for _, row in tqdm(df.iterrows(), total=len(df), desc="处理视频"):
@@ -173,44 +140,119 @@ class BatchFallEvaluator:
                     has_fall=has_fall
                 )
                 
-                # 收集结果
-                all_frame_labels.extend(eval_result['frame_labels'])
-                all_frame_predictions.extend(eval_result['frame_predictions'])
+                # 收集序列级别的结果
+                sequence_predictions = [pred['is_fall'] for pred in eval_result['predictions']]
+                sequence_probabilities = [pred['probability'] for pred in eval_result['predictions']]
+                sequence_labels = eval_result['labels']
                 
-                # 收集原始预测概率
-                frame_probabilities = np.zeros(len(pose_data))
-                for pred in eval_result['predictions']:
-                    start_frame = int(pred['start_frame'])
-                    end_frame = int(pred['end_frame'])
-                    if 0 <= start_frame < len(pose_data) and 0 <= end_frame < len(pose_data):
-                        frame_probabilities[start_frame:end_frame] = pred['probability']
-                all_frame_probabilities.extend(frame_probabilities)
+                all_sequence_labels.extend(sequence_labels)
+                all_sequence_predictions.extend(sequence_predictions)
+                all_sequence_probabilities.extend(sequence_probabilities)
+                
+                # 收集视频级别的结果
+                max_prob = max(pred['probability'] for pred in eval_result['predictions']) if eval_result['predictions'] else 0
+                video_prediction = int(max_prob >= self.threshold)
+                
+                all_video_labels.append(has_fall)
+                all_video_predictions.append(video_prediction)
                 
                 # 添加视频级别的结果
-                results.append({
+                video_results.append({
                     'video_id': video_id,
                     'has_fall': has_fall,
                     'fall_start': fall_start,
                     'fall_end': fall_end,
                     'predictions': eval_result['predictions'],
-                    'detected_falls': len(eval_result['fall_windows'])
+                    'sequence_labels': sequence_labels,
+                    'detected_falls': len(eval_result['fall_windows']),
+                    'max_probability': max_prob
                 })
                 
             except Exception as e:
                 print(f"处理视频 {video_id} 时出错: {str(e)}")
                 continue
         
+        # 计算序列级别的性能指标
+        sequence_classification_rep = classification_report(
+            all_sequence_labels, 
+            all_sequence_predictions, 
+            output_dict=True,
+            zero_division=0
+        )
+        sequence_conf_matrix = confusion_matrix(all_sequence_labels, all_sequence_predictions)
+        
         # 寻找最优阈值
-        all_frame_labels = np.array(all_frame_labels)
-        all_frame_probabilities = np.array(all_frame_probabilities)
-        optimal_results = self.find_optimal_threshold(all_frame_labels, all_frame_probabilities)
+        optimal_results = self.find_optimal_threshold(
+            all_sequence_labels,
+            all_sequence_probabilities,
+            level='sequence'
+        )
+        
+        # 计算视频级别的性能指标
+        video_classification_rep = classification_report(
+            all_video_labels, 
+            all_video_predictions, 
+            output_dict=True,
+            zero_division=0
+        )
+        video_conf_matrix = confusion_matrix(all_video_labels, all_video_predictions)
         
         return {
-            'video_results': results,
-            'classification_report': optimal_results['classification_report'],
-            'confusion_matrix': optimal_results['confusion_matrix'],
-            'optimal_threshold': optimal_results['threshold']
+            'video_results': video_results,
+            'video_classification_report': video_classification_rep,
+            'video_confusion_matrix': video_conf_matrix,
+            'sequence_classification_report': sequence_classification_rep,
+            'sequence_confusion_matrix': sequence_conf_matrix,
+            'optimal_threshold_results': optimal_results
         }
+        
+    def find_optimal_threshold(self, labels, probabilities, level='sequence', thresholds=None):
+        """
+        寻找最优分类阈值
+        
+        参数:
+            labels: 真实标签列表
+            probabilities: 预测概率列表
+            level: 优化级别,可选'sequence'或'video'
+            thresholds: 要评估的阈值列表，如果为None则自动生成
+            
+        返回:
+            最优阈值和对应的评估结果
+        """
+        if thresholds is None:
+            thresholds = np.arange(0.05, 0.96, 0.01)  # 从0.05到0.95，步长0.01
+            
+        best_threshold = 0.5
+        best_accuracy = 0
+        best_results = None
+        
+        print(f"\n开始寻找{level}级别最优阈值...")
+        
+        for threshold in tqdm(thresholds, desc="评估阈值"):
+            # 使用当前阈值进行分类
+            predictions = [int(prob >= threshold) for prob in probabilities]
+            
+            # 计算性能指标
+            classification_rep = classification_report(labels, predictions, output_dict=True, zero_division=0)
+            conf_matrix = confusion_matrix(labels, predictions)
+            
+            # 使用整体准确率作为优化目标
+            current_accuracy = classification_rep['accuracy']
+            
+            if current_accuracy > best_accuracy:
+                best_accuracy = current_accuracy
+                best_threshold = threshold
+                best_results = {
+                    'threshold': threshold,
+                    'accuracy': current_accuracy,
+                    'classification_report': classification_rep,
+                    'confusion_matrix': conf_matrix
+                }
+                
+        print("\n找到最优阈值: {:.3f}".format(best_threshold))
+        print("最佳准确率: {:.4f}".format(best_accuracy))
+        
+        return best_results
         
     def save_results(self, results, output_dir):
         """
@@ -225,9 +267,20 @@ class BatchFallEvaluator:
         # 保存整体评估结果
         summary_file = os.path.join(output_dir, 'evaluation_summary.json')
         summary = {
-            'classification_report': results['classification_report'],
-            'confusion_matrix': results['confusion_matrix'].tolist(),
-            'optimal_threshold': results['optimal_threshold']
+            'video_level_results': {
+                'classification_report': results['video_classification_report'],
+                'confusion_matrix': results['video_confusion_matrix'].tolist(),
+            },
+            'sequence_level_results': {
+                'classification_report': results['sequence_classification_report'],
+                'confusion_matrix': results['sequence_confusion_matrix'].tolist(),
+            },
+            'optimal_threshold': {
+                'value': results['optimal_threshold_results']['threshold'],
+                'accuracy': results['optimal_threshold_results']['accuracy'],
+                'classification_report': results['optimal_threshold_results']['classification_report'],
+                'confusion_matrix': results['optimal_threshold_results']['confusion_matrix'].tolist()
+            }
         }
         
         with open(summary_file, 'w', encoding='utf-8') as f:
@@ -238,29 +291,53 @@ class BatchFallEvaluator:
         video_results = []
         
         for video_result in results['video_results']:
-            # 统计预测的跌倒概率
-            pred_probs = [pred['probability'] for pred in video_result['predictions']]
-            max_prob = max(pred_probs) if pred_probs else 0
-            avg_prob = np.mean(pred_probs) if pred_probs else 0
-            
             video_results.append({
                 'video_id': video_result['video_id'],
                 'true_has_fall': video_result['has_fall'],
                 'true_fall_start': video_result['fall_start'],
                 'true_fall_end': video_result['fall_end'],
                 'detected_falls': video_result['detected_falls'],
-                'max_fall_probability': max_prob,
-                'avg_fall_probability': avg_prob,
+                'max_probability': video_result['max_probability'],
                 'prediction_correct': (video_result['has_fall'] == (video_result['detected_falls'] > 0))
             })
             
         pd.DataFrame(video_results).to_csv(details_file, index=False)
         
         # 绘制混淆矩阵
+        self._plot_confusion_matrix(
+            results['video_confusion_matrix'], 
+            'Video Level Confusion Matrix',
+            os.path.join(output_dir, 'video_confusion_matrix.png')
+        )
+        
+        self._plot_confusion_matrix(
+            results['sequence_confusion_matrix'], 
+            'Sequence Level Confusion Matrix',
+            os.path.join(output_dir, 'sequence_confusion_matrix.png')
+        )
+        
+        self._plot_confusion_matrix(
+            results['optimal_threshold_results']['confusion_matrix'], 
+            'Optimal Threshold Confusion Matrix',
+            os.path.join(output_dir, 'optimal_threshold_confusion_matrix.png')
+        )
+        
+        print("\n评估结果已保存至: {}".format(output_dir))
+        
+        print("\n序列级别评估结果:")
+        self._print_metrics(results['sequence_classification_report'])
+        
+        print("\n视频级别评估结果:")
+        self._print_metrics(results['video_classification_report'])
+        
+        print("\n最优阈值 ({:.3f}) 的评估结果:".format(results['optimal_threshold_results']['threshold']))
+        self._print_metrics(results['optimal_threshold_results']['classification_report'])
+        
+    def _plot_confusion_matrix(self, conf_matrix, title, save_path):
+        """绘制混淆矩阵"""
         plt.figure(figsize=(8, 6))
-        conf_matrix = results['confusion_matrix']
         plt.imshow(conf_matrix, interpolation='nearest', cmap=plt.cm.Blues)
-        plt.title('Confusion Matrix')
+        plt.title(title)
         plt.colorbar()
         
         class_names = ['Normal', 'Fall']
@@ -279,15 +356,11 @@ class BatchFallEvaluator:
         plt.tight_layout()
         plt.ylabel('True Label')
         plt.xlabel('Predicted Label')
-        plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
+        plt.savefig(save_path)
         plt.close()
         
-        print(f"\n评估结果已保存至: {output_dir}")
-        print(f"最优分类阈值: {results['optimal_threshold']:.3f}")
-        print(f"\n分类报告:")
-        # 直接使用已经计算好的分类报告
-        classification_rep = results['classification_report']
-        
+    def _print_metrics(self, classification_rep):
+        """打印评估指标"""
         # 找到正确的键名
         normal_key = [k for k in classification_rep.keys() if k.startswith('0')][0]
         fall_key = [k for k in classification_rep.keys() if k.startswith('1')][0]
