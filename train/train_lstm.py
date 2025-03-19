@@ -35,7 +35,7 @@ class EarlyStopping:
         min_delta (float): 最小改善幅度，小于此值视为没有改善
         verbose (bool): 是否打印早停信息
     """
-    def __init__(self, patience=7, min_delta=0, verbose=True):
+    def __init__(self, patience=10, min_delta=0, verbose=True):
         self.patience = patience
         self.min_delta = min_delta
         self.verbose = verbose
@@ -303,7 +303,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     val_accs = []
     
     # 初始化早停
-    early_stopping = EarlyStopping(patience=7, verbose=True)
+    early_stopping = EarlyStopping(patience=10, verbose=True)
     
     for epoch in range(num_epochs):
         # 训练阶段
@@ -569,16 +569,16 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=30, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=40, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
-    parser.add_argument('--fall_stride', type=int, default=15, help='跌倒视频滑动步长')
-    parser.add_argument('--overlap_threshold', type=float, default=0.3, help='跌倒判定的重叠比例阈值')
+    parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
+    parser.add_argument('--overlap_threshold', type=float, default=0.35, help='跌倒判定的重叠比例阈值')
     
     # 数据集划分参数
     parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
-    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.2, help='验证集占训练数据的比例')
     
     # 数据平衡参数
     parser.add_argument('--balance_strategy', type=str, default='none', 
@@ -589,7 +589,7 @@ def process_args():
     
     # 其他原有参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
-    parser.add_argument('--num_epochs', type=int, default=30, help='训练轮数')
+    parser.add_argument('--num_epochs', type=int, default=80, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2正则化系数')
     parser.add_argument('--l1_lambda', type=float, default=1e-5, help='L1正则化系数')

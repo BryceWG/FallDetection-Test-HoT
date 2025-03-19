@@ -19,6 +19,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 from datetime import datetime
+from collections import Counter
+from data_balancer import create_balanced_loader
 
 sys.path.append(os.getcwd())
 
@@ -550,7 +552,7 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=40, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=35, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
@@ -561,15 +563,22 @@ def process_args():
     parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
     parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
     
+    # 数据平衡参数
+    parser.add_argument('--balance_strategy', type=str, default='none', 
+                       choices=['none', 'oversample', 'undersample', 'smote'],
+                       help='数据平衡策略')
+    parser.add_argument('--target_ratio', type=float, default=1.0,
+                       help='目标类别比例(跌倒:非跌倒),仅在balance_strategy不为none时有效')
+    
     # 训练参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
-    parser.add_argument('--num_epochs', type=int, default=30, help='训练轮数')
+    parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2正则化系数')
     parser.add_argument('--l1_lambda', type=float, default=1e-5, help='L1正则化系数')
     
     # 模型参数
-    parser.add_argument('--hidden_dim', type=int, default=96, help='GRU隐藏层维度')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='GRU隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=2, help='GRU层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
     
@@ -727,7 +736,45 @@ def main():
     print(f"验证集大小: {len(val_dataset)}")
     print(f"测试集大小: {len(test_dataset)}")
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    # 创建数据加载器
+    print("\n创建数据加载器...")
+    
+    if args.balance_strategy != 'none':
+        # 使用数据平衡策略
+        # 计算目标样本数
+        train_labels = [train_dataset[i]['label'].item() for i in range(len(train_dataset))]
+        label_counts = Counter(train_labels)
+        
+        if args.target_ratio != 1.0:
+            # 使用自定义比例
+            max_count = max(label_counts.values())
+            target_counts = {
+                0: int(max_count),  # 非跌倒类保持不变
+                1: int(max_count * args.target_ratio)  # 跌倒类根据比例调整
+            }
+        else:
+            # 自动平衡到相同数量
+            target_counts = 'auto'
+            
+        print(f"\n使用{args.balance_strategy}策略平衡数据...")
+        train_loader = create_balanced_loader(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            strategy=args.balance_strategy,
+            sampling_strategy=target_counts,
+            shuffle=True,
+            num_workers=4
+        )
+    else:
+        # 使用原始数据加载器
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=4
+        )
+    
+    # 验证集和测试集不需要平衡
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
