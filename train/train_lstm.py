@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# python train_lstm.py --label_file fall_frame_data.csv --data_dir ./demo/output/ --seq_length 30 --stride 15 --batch_size 8 --num_epochs 100 --learning_rate 0.0005 --hidden_dim 256 --num_layers 3 --dropout 0.3 --save_dir ./my_models/fall_detection/ 
+# python train/train_lstm.py --label_file fall_frame_data.csv
 import os
 import sys
 import glob
@@ -21,6 +21,43 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 sys.path.append(os.getcwd())
+
+
+class EarlyStopping:
+    """早停策略
+    
+    当验证集性能在patience个epoch内没有改善时，提前结束训练
+    
+    Args:
+        patience (int): 等待改善的epoch数
+        min_delta (float): 最小改善幅度，小于此值视为没有改善
+        verbose (bool): 是否打印早停信息
+    """
+    def __init__(self, patience=7, min_delta=0, verbose=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.verbose = verbose
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+        self.best_model = None
+        
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.best_model = copy.deepcopy(model.state_dict())
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+                if self.verbose:
+                    print('Early stopping triggered')
+        else:
+            self.best_loss = val_loss
+            self.best_model = copy.deepcopy(model.state_dict())
+            self.counter = 0
 
 
 class FallDetectionLSTM(nn.Module):
@@ -251,7 +288,7 @@ class PoseSequenceDataset(Dataset):
         }
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, save_dir='./checkpoints/fall_detection'):
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, l1_lambda=0, save_dir='./checkpoints/fall_detection'):
     """
     训练模型
     """
@@ -262,6 +299,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     val_losses = []
     train_accs = []
     val_accs = []
+    
+    # 初始化早停
+    early_stopping = EarlyStopping(patience=7, verbose=True)
     
     for epoch in range(num_epochs):
         # 训练阶段
@@ -278,6 +318,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             # 前向传播
             outputs = model(sequences)
             loss = criterion(outputs, labels)
+            
+            # 添加L1正则化
+            if l1_lambda > 0:
+                l1_norm = sum(p.abs().sum() for p in model.parameters())
+                loss = loss + l1_lambda * l1_norm
             
             # 反向传播和优化
             optimizer.zero_grad()
@@ -335,6 +380,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         if scheduler:
             scheduler.step(val_loss)
         
+        # 早停检查
+        early_stopping(val_loss, model)
+        
         # 保存最佳模型
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -366,6 +414,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 'train_accs': train_accs,
                 'val_accs': val_accs
             }, os.path.join(save_dir, f'model_epoch_{epoch+1}.pth'))
+        
+        # 如果触发早停，恢复最佳模型并结束训练
+        if early_stopping.early_stop:
+            print("早停触发，恢复最佳模型")
+            model.load_state_dict(early_stopping.best_model)
+            break
     
     # 保存训练历史
     history = {
@@ -513,24 +567,26 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=20, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=40, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
     parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
-    parser.add_argument('--overlap_threshold', type=float, default=0.5, help='跌倒判定的重叠比例阈值')
+    parser.add_argument('--overlap_threshold', type=float, default=0.35, help='跌倒判定的重叠比例阈值')
     
     # 数据集划分参数
-    parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
-    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
+    parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.2, help='验证集占训练数据的比例')
     
     # 其他原有参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
-    parser.add_argument('--num_epochs', type=int, default=40, help='训练轮数')
+
+    parser.add_argument('--num_epochs', type=int, default=30, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=5e-6, help='权重衰减')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2正则化系数')
+    parser.add_argument('--l1_lambda', type=float, default=1e-5, help='L1正则化系数')
     parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
-    parser.add_argument('--num_layers', type=int, default=3, help='LSTM层数')
+    parser.add_argument('--num_layers', type=int, default=2, help='LSTM层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
     
     # 生成带时间戳的保存目录
@@ -579,6 +635,7 @@ def save_training_summary(args, train_results, test_results, save_dir):
             "num_epochs": args.num_epochs,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
+            "l1_lambda": args.l1_lambda,
             "seed": args.seed
         }
     }
@@ -754,6 +811,7 @@ def main():
         num_epochs=args.num_epochs,
         device=device,
         scheduler=scheduler,
+        l1_lambda=args.l1_lambda,
         save_dir=args.save_dir
     )
     print("训练完成!")
