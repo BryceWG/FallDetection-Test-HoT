@@ -417,9 +417,14 @@ class PoseSequenceDataset(Dataset):
         }
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, save_dir='./checkpoints/fall_detection_stgcn'):
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, save_dir='./checkpoints/fall_detection_stgcn', 
+             early_stopping_patience=10, early_stopping_delta=0.001):
     """
     训练模型
+    
+    Args:
+        early_stopping_patience: 早停耐心值，连续多少个epoch验证集性能没有改善则停止训练
+        early_stopping_delta: 性能改善的最小差值，小于此值视为没有改善
     """
     os.makedirs(save_dir, exist_ok=True)
     
@@ -428,6 +433,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     val_losses = []
     train_accs = []
     val_accs = []
+    
+    # 早停计数器和最佳性能记录
+    early_stopping_counter = 0
+    best_val_metrics = {
+        'epoch': 0,
+        'loss': float('inf'),
+        'acc': 0
+    }
     
     for epoch in range(num_epochs):
         # 训练阶段
@@ -501,9 +514,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         if scheduler:
             scheduler.step(val_loss)
         
-        # 保存最佳模型
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # 检查是否为最佳模型
+        if val_loss < best_val_metrics['loss'] - early_stopping_delta:
+            best_val_metrics = {
+                'epoch': epoch,
+                'loss': val_loss,
+                'acc': val_acc
+            }
+            early_stopping_counter = 0
+            
+            # 保存最佳模型
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -513,6 +533,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             }, os.path.join(save_dir, 'best_model.pth'))
             
             print(f"保存最佳模型, 验证损失: {val_loss:.4f}, 验证准确率: {val_acc:.4f}")
+        else:
+            early_stopping_counter += 1
+            
+        # 早停检查
+        if early_stopping_counter >= early_stopping_patience:
+            print(f"\n早停触发! {early_stopping_patience} 个epoch内验证损失没有改善。")
+            print(f"最佳验证损失 {best_val_metrics['loss']:.4f} 在epoch {best_val_metrics['epoch'] + 1}")
+            break
         
         # 每个epoch结束后显示指标
         print(f"Epoch {epoch+1}/{num_epochs} - "
@@ -538,7 +566,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         'train_losses': train_losses,
         'val_losses': val_losses,
         'train_accs': train_accs,
-        'val_accs': val_accs
+        'val_accs': val_accs,
+        'best_val_metrics': best_val_metrics
     }
     
     with open(os.path.join(save_dir, 'training_history.pkl'), 'wb') as f:
@@ -679,7 +708,7 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=35, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=40, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
@@ -688,18 +717,22 @@ def process_args():
     
     # 数据集划分参数
     parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
-    parser.add_argument('--val_ratio', type=float, default=0.2, help='验证集占训练数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
     
     # ST-GCN特有参数
-    parser.add_argument('--hidden_dim', type=int, default=96, help='GCN隐藏层维度')
+    parser.add_argument('--hidden_dim', type=int, default=256, help='GCN隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=2, help='ST-GCN层数')
     
     # 其他训练参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
-    parser.add_argument('--num_epochs', type=int, default=30, help='训练轮数')
+    parser.add_argument('--num_epochs', type=int, default=100, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=5e-6, help='权重衰减')
-    parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='权重衰减')
+    parser.add_argument('--dropout', type=float, default=0.4, help='Dropout比例')
+    
+    # 早停参数
+    parser.add_argument('--early_stopping_patience', type=int, default=10, help='早停耐心值，连续多少个epoch验证集性能没有改善则停止训练')
+    parser.add_argument('--early_stopping_delta', type=float, default=0.001, help='性能改善的最小差值，小于此值视为没有改善')
     
     # 生成带时间戳的保存目录
     timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
@@ -934,7 +967,9 @@ def main():
         num_epochs=args.num_epochs,
         device=device,
         scheduler=scheduler,
-        save_dir=save_dir
+        save_dir=save_dir,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_delta=args.early_stopping_delta
     )
     print("训练完成!")
     
