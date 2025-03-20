@@ -18,19 +18,26 @@ class BatchFallEvaluator:
     批量跌倒评估器
     用于评估多个视频的跌倒检测结果
     """
-    def __init__(self, predictor, window_size=30, stride=15, threshold=0.5):
+    def __init__(self, predictor, normal_seq_length=30, normal_stride=40,
+                 fall_seq_length=30, fall_stride=10, overlap_threshold=0.35, threshold=0.5):
         """
         初始化评估器
         
         参数:
             predictor: FallPredictor实例
-            window_size: 滑动窗口大小
-            stride: 滑动步长
+            normal_seq_length: 正常序列长度
+            normal_stride: 正常序列步长
+            fall_seq_length: 跌倒序列长度
+            fall_stride: 跌倒序列步长
+            overlap_threshold: 重叠阈值
             threshold: 跌倒判定阈值
         """
         self.predictor = predictor
-        self.window_size = window_size
-        self.stride = stride
+        self.normal_seq_length = normal_seq_length
+        self.normal_stride = normal_stride
+        self.fall_seq_length = fall_seq_length
+        self.fall_stride = fall_stride
+        self.overlap_threshold = overlap_threshold
         self.threshold = threshold
         
     def evaluate_sequence(self, pose_data, true_start=None, true_end=None, has_fall=False):
@@ -50,8 +57,8 @@ class BatchFallEvaluator:
         sequence_labels = []
         
         # 根据是否为跌倒序列选择不同的窗口参数
-        seq_length = self.window_size
-        stride = self.stride if has_fall else self.stride * 2  # 非跌倒视频使用更大的步长
+        seq_length = self.fall_seq_length if has_fall else self.normal_seq_length
+        stride = self.fall_stride if has_fall else self.normal_stride
         
         # 遍历视频帧,生成序列
         total_frames = len(pose_data)
@@ -69,7 +76,7 @@ class BatchFallEvaluator:
                 overlap_end = min(end_idx, true_end)
                 if overlap_end > overlap_start:
                     overlap_ratio = (overlap_end - overlap_start) / seq_length
-                    is_fall_seq = overlap_ratio >= 0.3  # 使用与训练时相同的阈值
+                    is_fall_seq = overlap_ratio >= self.overlap_threshold  # 使用与训练时相同的阈值
                 else:
                     is_fall_seq = False
             else:
@@ -376,23 +383,157 @@ class BatchFallEvaluator:
         print(f"Fall (1): {classification_rep[fall_key]['f1-score']:.4f}")
         print(f"\n整体准确率: {classification_rep['accuracy']:.4f}")
 
+def evaluate_multiple_models(base_model_dir, csv_file, pose_dir, output_dir, device, **kwargs):
+    """
+    评估指定目录下所有模型的性能
+    
+    参数:
+        base_model_dir: 包含多个模型checkpoint的基础目录
+        csv_file: 包含视频信息的CSV文件路径
+        pose_dir: 3D姿态文件的基础目录
+        output_dir: 结果保存目录
+        device: 运行设备
+        **kwargs: 其他参数,将传递给BatchFallEvaluator
+    
+    返回:
+        包含所有模型评估结果的字典
+    """
+    # 创建输出目录
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 存储所有模型的结果
+    all_results = {
+        'sequence_level': [],
+        'video_level': [],
+        'optimal_threshold': []
+    }
+    
+    # 遍历所有子目录查找模型文件
+    for root, dirs, files in os.walk(base_model_dir):
+        for file in files:
+            if file == 'best_model.pth':
+                model_path = os.path.join(root, file)
+                print(f"\n正在评估模型: {model_path}")
+                
+                try:
+                    # 尝试加载训练参数
+                    training_summary_path = os.path.join(os.path.dirname(model_path), 'training_summary.json')
+                    model_params = {}
+                    data_params = {}
+                    
+                    if os.path.exists(training_summary_path):
+                        try:
+                            training_params = load_training_params(training_summary_path)
+                            if training_params and 'parameters' in training_params:
+                                params = training_params['parameters']
+                                if 'model_params' in params:
+                                    model_params = params['model_params']
+                                if 'data_params' in params:
+                                    data_params = params['data_params']
+                        except Exception as e:
+                            print(f"加载训练参数文件失败: {str(e)}, 跳过该模型")
+                            continue
+                    
+                    # 创建预测器
+                    try:
+                        predictor = FallPredictor(
+                            model_path=model_path,
+                            hidden_dim=model_params.get('hidden_dim', kwargs.get('hidden_dim', 256)),
+                            num_layers=model_params.get('num_layers', kwargs.get('num_layers', 3)),
+                            dropout=model_params.get('dropout', kwargs.get('dropout', 0.3)),
+                            device=device
+                        )
+                    except Exception as e:
+                        print(f"加载模型失败: {str(e)}, 跳过该模型")
+                        continue
+                    
+                    # 创建评估器
+                    evaluator = BatchFallEvaluator(
+                        predictor=predictor,
+                        normal_seq_length=data_params.get('normal_seq_length', kwargs.get('normal_seq_length', 30)),
+                        normal_stride=data_params.get('normal_stride', kwargs.get('normal_stride', 40)),
+                        fall_seq_length=data_params.get('fall_seq_length', kwargs.get('fall_seq_length', 30)),
+                        fall_stride=data_params.get('fall_stride', kwargs.get('fall_stride', 10)),
+                        overlap_threshold=data_params.get('overlap_threshold', kwargs.get('overlap_threshold', 0.35)),
+                        threshold=kwargs.get('threshold', 0.5)
+                    )
+                    
+                    # 执行评估
+                    results = evaluator.evaluate_dataset(csv_file, pose_dir)
+                    
+                    # 保存当前模型的结果
+                    model_output_dir = os.path.join(output_dir, os.path.basename(os.path.dirname(root)))
+                    evaluator.save_results(results, model_output_dir)
+                    
+                    # 收集结果
+                    model_result = {
+                        'model_path': model_path,
+                        'sequence_accuracy': results['sequence_classification_report']['accuracy'],
+                        'video_accuracy': results['video_classification_report']['accuracy'],
+                        'optimal_threshold': results['optimal_threshold_results']['threshold'],
+                        'optimal_accuracy': results['optimal_threshold_results']['accuracy']
+                    }
+                    
+                    all_results['sequence_level'].append(model_result.copy())
+                    all_results['video_level'].append(model_result.copy())
+                    all_results['optimal_threshold'].append(model_result.copy())
+                    
+                except Exception as e:
+                    print(f"评估模型 {model_path} 时出错: {str(e)}")
+                    continue
+    
+    # 对结果进行排序
+    for key in all_results:
+        all_results[key].sort(key=lambda x: x[key.replace('_level', '_accuracy') if key != 'optimal_threshold' else 'optimal_accuracy'], reverse=True)
+    
+    # 保存汇总结果
+    summary_file = os.path.join(output_dir, 'evaluation_summary.json')
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        json.dump(all_results, f, indent=4, ensure_ascii=False)
+    
+    # 打印最佳结果
+    print("\n=== 评估结果汇总 ===")
+    print("\n序列级别最佳模型:")
+    best_sequence = all_results['sequence_level'][0]
+    print(f"模型路径: {best_sequence['model_path']}")
+    print(f"准确率: {best_sequence['sequence_accuracy']:.4f}")
+    
+    print("\n视频级别最佳模型:")
+    best_video = all_results['video_level'][0]
+    print(f"模型路径: {best_video['model_path']}")
+    print(f"准确率: {best_video['video_accuracy']:.4f}")
+    
+    print("\n最优阈值最佳模型:")
+    best_threshold = all_results['optimal_threshold'][0]
+    print(f"模型路径: {best_threshold['model_path']}")
+    print(f"准确率: {best_threshold['optimal_accuracy']:.4f}")
+    print(f"最优阈值: {best_threshold['optimal_threshold']:.4f}")
+    
+    return all_results
+
 def process_args():
     """
     处理命令行参数
     """
     parser = argparse.ArgumentParser(description='批量评估跌倒检测模型')
-    parser.add_argument('--model_path', type=str, required=True,
-                      help='训练好的模型checkpoint路径')
+    parser.add_argument('--model_path', type=str, help='训练好的模型checkpoint路径')
+    parser.add_argument('--model_dir', type=str, help='包含多个模型checkpoint的目录')
     parser.add_argument('--csv_file', type=str, required=True,
                       help='包含视频信息的CSV文件路径')
     parser.add_argument('--pose_dir', type=str, required=True,
                       help='3D姿态文件的基础目录')
     parser.add_argument('--threshold', type=float, default=0.5,
                       help='跌倒判定阈值')
-    parser.add_argument('--window_size', type=int, default=30,
-                      help='滑动窗口大小')
-    parser.add_argument('--stride', type=int, default=15,
-                      help='滑动步长')
+    parser.add_argument('--normal_seq_length', type=int, default=30,
+                      help='正常序列长度')
+    parser.add_argument('--normal_stride', type=int, default=40,
+                      help='正常序列步长')
+    parser.add_argument('--fall_seq_length', type=int, default=30,
+                      help='跌倒序列长度')
+    parser.add_argument('--fall_stride', type=int, default=10,
+                      help='跌倒序列步长')
+    parser.add_argument('--overlap_threshold', type=float, default=0.35,
+                      help='重叠阈值')
     parser.add_argument('--hidden_dim', type=int, default=256,
                       help='LSTM隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=3,
@@ -408,31 +549,11 @@ def process_args():
     
     args = parser.parse_args()
     
-    # 如果指定了使用训练参数,则尝试加载
-    if args.use_training_params:
-        training_params = load_training_params(args.model_path)
-        if training_params and 'parameters' in training_params:
-            params = training_params['parameters']
-            
-            # 更新模型参数
-            if 'model_params' in params:
-                model_params = params['model_params']
-                args.hidden_dim = model_params.get('hidden_dim', args.hidden_dim)
-                args.num_layers = model_params.get('num_layers', args.num_layers)
-                args.dropout = model_params.get('dropout', args.dropout)
-                print("\n使用训练时的模型参数:")
-                print(f"hidden_dim: {args.hidden_dim}")
-                print(f"num_layers: {args.num_layers}")
-                print(f"dropout: {args.dropout}")
-            
-            # 更新数据处理参数
-            if 'data_params' in params:
-                data_params = params['data_params']
-                args.window_size = data_params.get('fall_seq_length', args.window_size)
-                args.stride = data_params.get('fall_stride', args.stride)
-                print("\n使用训练时的数据处理参数:")
-                print(f"window_size: {args.window_size}")
-                print(f"stride: {args.stride}")
+    if not args.model_path and not args.model_dir:
+        parser.error("必须指定--model_path或--model_dir之一")
+    
+    if args.model_path and args.model_dir:
+        parser.error("--model_path和--model_dir不能同时指定")
     
     return args
 
@@ -447,32 +568,51 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     try:
-        # 创建预测器
-        predictor = FallPredictor(
-            model_path=args.model_path,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            device=device
-        )
-        
-        # 创建评估器
-        evaluator = BatchFallEvaluator(
-            predictor=predictor,
-            window_size=args.window_size,
-            stride=args.stride,
-            threshold=args.threshold
-        )
-        
-        # 执行批量评估
-        results = evaluator.evaluate_dataset(
-            csv_file=args.csv_file,
-            base_pose_dir=args.pose_dir
-        )
-        
-        # 保存结果
-        evaluator.save_results(results, args.output_dir)
-        
+        if args.model_dir:
+            # 评估多个模型
+            evaluate_multiple_models(
+                base_model_dir=args.model_dir,
+                csv_file=args.csv_file,
+                pose_dir=args.pose_dir,
+                output_dir=args.output_dir,
+                device=device,
+                hidden_dim=args.hidden_dim,
+                num_layers=args.num_layers,
+                dropout=args.dropout,
+                normal_seq_length=args.normal_seq_length,
+                normal_stride=args.normal_stride,
+                fall_seq_length=args.fall_seq_length,
+                fall_stride=args.fall_stride,
+                overlap_threshold=args.overlap_threshold,
+                threshold=args.threshold
+            )
+        else:
+            # 评估单个模型
+            predictor = FallPredictor(
+                model_path=args.model_path,
+                hidden_dim=args.hidden_dim,
+                num_layers=args.num_layers,
+                dropout=args.dropout,
+                device=device
+            )
+            
+            evaluator = BatchFallEvaluator(
+                predictor=predictor,
+                normal_seq_length=args.normal_seq_length,
+                normal_stride=args.normal_stride,
+                fall_seq_length=args.fall_seq_length,
+                fall_stride=args.fall_stride,
+                overlap_threshold=args.overlap_threshold,
+                threshold=args.threshold
+            )
+            
+            results = evaluator.evaluate_dataset(
+                csv_file=args.csv_file,
+                base_pose_dir=args.pose_dir
+            )
+            
+            evaluator.save_results(results, args.output_dir)
+            
     except Exception as e:
         print(f"错误: {str(e)}")
         sys.exit(1)
