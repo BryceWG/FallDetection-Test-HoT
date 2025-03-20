@@ -146,6 +146,7 @@ class PoseSequenceDataset(Dataset):
         
         # 创建数据索引
         self._create_sequence_samples()
+        self._compute_global_stats()
     
     def _load_pose_data(self, video_id, has_fall):
         """
@@ -225,6 +226,34 @@ class PoseSequenceDataset(Dataset):
         if total_samples > 0:
             print(f"跌倒/非跌倒比例: {fall_samples/non_fall_samples:.2f}")
     
+    def _compute_global_stats(self):
+        """
+        计算所有训练数据的均值和标准差，用于Z-score标准化
+        """
+        print("\n计算全局统计信息...")
+        all_sequences = []
+        
+        for sample in tqdm(self.samples, desc="加载数据"):
+            pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
+            if pose_data is None:
+                continue
+                
+            start_idx = sample['start_idx']
+            end_idx = sample['end_idx']
+            
+            sequence = pose_data[start_idx:end_idx]
+            sequence = sequence.reshape(len(sequence), -1)
+            all_sequences.append(sequence)
+            
+        all_data = np.concatenate(all_sequences, axis=0)
+        self.global_mean = np.mean(all_data, axis=0)
+        self.global_std = np.std(all_data, axis=0)
+        # 避免除零
+        self.global_std[self.global_std < 1e-7] = 1.0
+        
+        print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
+        print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
+    
     def __len__(self):
         return len(self.samples)
     
@@ -240,34 +269,21 @@ class PoseSequenceDataset(Dataset):
         
         # 确保序列长度一致
         if end_idx - start_idx < self.normal_seq_length:
-            # 如果序列不够长,进行填充
             padding_length = self.normal_seq_length - (end_idx - start_idx)
             sequence = pose_data[start_idx:end_idx]
-            
-            # 通过重复最后一帧进行填充
             last_frame = sequence[-1:].repeat(padding_length, axis=0)
             sequence = np.concatenate([sequence, last_frame], axis=0)
         else:
-            # 如果序列足够长,直接截取指定长度
             sequence = pose_data[start_idx:start_idx + self.normal_seq_length]
         
         # 展平每一帧的关键点数据
-        # 原始形状: [seq_len, num_joints, 3]
-        # 转换为: [seq_len, num_joints * 3]
-        num_joints = sequence.shape[1]
         flattened_sequence = sequence.reshape(self.normal_seq_length, -1)
         
-        # 特征标准化
+        # 使用Z-score标准化
         if self.transform:
             flattened_sequence = self.transform(flattened_sequence)
         else:
-            # 简单的min-max标准化
-            seq_min = flattened_sequence.min(axis=0, keepdims=True)
-            seq_max = flattened_sequence.max(axis=0, keepdims=True)
-            seq_range = seq_max - seq_min
-            # 避免除零
-            seq_range[seq_range == 0] = 1.0
-            flattened_sequence = (flattened_sequence - seq_min) / seq_range
+            flattened_sequence = (flattened_sequence - self.global_mean) / self.global_std
         
         # 转换为tensor
         sequence_tensor = torch.FloatTensor(flattened_sequence)
@@ -561,7 +577,7 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=40, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=10, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
