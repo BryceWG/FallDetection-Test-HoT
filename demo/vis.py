@@ -123,7 +123,7 @@ def show3Dpose(vals, ax, fix_z):
     ax.tick_params('z', labelleft = False)
 
 
-def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch_size=200):
+def get_pose2D(video_path, output_dir, save_json=False, detector='yolo11', batch_size=200):
     """
     从视频中提取2D人体姿态关键点
     """
@@ -142,7 +142,10 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolov3', batch
             from lib.yolov3.human_detector import load_model as yolo_model
             from lib.yolov3.human_detector import yolo_human_det as yolo_det
             
-        keypoints, scores = hrnet_pose(video_path, det_dim=416, num_peroson=1, gen_output=True, detector=detector, batch_size=batch_size)
+        # 使用更高的检测分辨率(832x832)和新的HRNet配置
+        keypoints, scores = hrnet_pose(video_path, det_dim=832, num_peroson=1, gen_output=True, 
+                                     detector=detector, batch_size=batch_size,
+                                     hrnet_cfg='demo/lib/hrnet/experiments/w48_512x384_adam_lr1e-3.yaml')
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
 

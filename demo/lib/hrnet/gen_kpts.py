@@ -86,18 +86,29 @@ def model_load(config):
     return model
 
 
-def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector='yolov3', batch_size=200):
+def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector='yolov3', batch_size=200, hrnet_cfg=None):
     """
     生成视频的关键点
     采用批量处理模式：先用YOLO处理所有帧，再用HRNet处理
     Args:
-        batch_size
+        video: 视频路径
+        det_dim: YOLO检测分辨率
+        num_peroson: 检测的人数
+        gen_output: 是否生成输出
+        detector: 使用的检测器类型
+        batch_size: 批处理大小
+        hrnet_cfg: HRNet配置文件路径，如果为None则使用默认配置
     """
     # 更新配置
     args = get_default_args()
     args.det_dim = det_dim
     args.num_person = num_peroson
     args.video = video
+    
+    # 使用自定义配置文件
+    if hrnet_cfg:
+        args.cfg = hrnet_cfg
+    
     reset_config(args)
 
     cap = cv2.VideoCapture(video)
