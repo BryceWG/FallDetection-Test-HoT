@@ -92,7 +92,7 @@ class PoseSequenceDataset2D(Dataset):
     """
     def __init__(self, data_dir, label_file, normal_seq_length=30, normal_stride=20,
                  fall_seq_length=30, fall_stride=15, overlap_threshold=0.3,
-                 transform=None, test_mode=False):
+                 transform=None, test_mode=False, pure_fall=False):
         self.data_dir = data_dir
         self.normal_seq_length = normal_seq_length
         self.normal_stride = normal_stride
@@ -101,6 +101,7 @@ class PoseSequenceDataset2D(Dataset):
         self.overlap_threshold = overlap_threshold
         self.transform = transform
         self.test_mode = test_mode
+        self.pure_fall = pure_fall
         
         # 加载标签数据
         print(f"\n正在加载标签文件: {label_file}")
@@ -123,7 +124,17 @@ class PoseSequenceDataset2D(Dataset):
         # 遍历所有视频
         for idx, row in self.labels_df.iterrows():
             video_id = row['video_id']
-            npz_file = os.path.join(self.data_dir, video_id, 'input_2D/input_keypoints_2d.npz')
+            has_fall = int(row['has_fall'])
+            
+            # 根据pure_fall模式选择不同的文件路径
+            if has_fall and self.pure_fall:
+                # 如果是跌倒视频且使用纯跌倒模式，读取splits目录下的数据
+                npz_file = os.path.join(self.data_dir, video_id, 
+                                      'input_2D/splits/fall_keypoints_2d.npz')
+            else:
+                # 其他情况读取原始数据
+                npz_file = os.path.join(self.data_dir, video_id, 
+                                      'input_2D/input_keypoints_2d.npz')
             
             if not os.path.exists(npz_file):
                 failed_videos.append(video_id)
@@ -138,10 +149,8 @@ class PoseSequenceDataset2D(Dataset):
                     failed_videos.append(video_id)
                     continue
                 
-                has_fall = int(row['has_fall'])
-                
-                if has_fall == 0:
-                    # 非跌倒视频: 使用normal_stride
+                if has_fall == 0 or not self.pure_fall:
+                    # 非跌倒视频或非纯跌倒模式：使用normal_stride
                     for start_idx in range(0, total_frames - self.normal_seq_length + 1, self.normal_stride):
                         end_idx = start_idx + self.normal_seq_length
                         
@@ -157,10 +166,7 @@ class PoseSequenceDataset2D(Dataset):
                             'end_idx': end_idx
                         })
                 else:
-                    # 跌倒视频: 使用fall_stride
-                    fall_start = int(row['fall_start_frame'])
-                    fall_end = int(row['fall_end_frame'])
-                    
+                    # 跌倒视频且纯跌倒模式：使用fall_stride
                     for start_idx in range(0, total_frames - self.fall_seq_length + 1, self.fall_stride):
                         end_idx = start_idx + self.fall_seq_length
                         
@@ -168,29 +174,12 @@ class PoseSequenceDataset2D(Dataset):
                         if end_idx > total_frames:
                             break
                         
-                        # 计算当前序列与跌倒帧段的重叠部分
-                        overlap_start = max(start_idx, fall_start)
-                        overlap_end = min(end_idx, fall_end)
-                        
-                        if overlap_end > overlap_start:
-                            # 存在重叠,计算重叠比例
-                            overlap_length = overlap_end - overlap_start + 1
-                            overlap_ratio = overlap_length / self.fall_seq_length
-                            
-                            # 根据overlap_threshold判断是否为跌倒
-                            is_fall = overlap_ratio >= self.overlap_threshold
-                        else:
-                            # 无重叠
-                            is_fall = False
-                            overlap_ratio = 0
-                        
                         self.samples.append({
                             'video_id': video_id,
                             'pose_file': npz_file,
-                            'label': int(is_fall),
+                            'label': 1,  # 纯跌倒模式下，跌倒视频的所有片段都标记为跌倒
                             'start_idx': start_idx,
-                            'end_idx': end_idx,
-                            'overlap_ratio': overlap_ratio
+                            'end_idx': end_idx
                         })
                 
                 processed_videos += 1
@@ -614,6 +603,10 @@ def process_args():
     parser.add_argument('--test_only', action='store_true', help='仅测试模式')
     parser.add_argument('--checkpoint', type=str, default=None, help='加载checkpoint路径')
     
+    # 添加新的参数
+    parser.add_argument('--pure_fall', action='store_true', 
+                       help='使用纯跌倒片段进行训练')
+    
     args = parser.parse_args()
     return args
 
@@ -729,7 +722,8 @@ def main():
         normal_stride=args.normal_stride,
         fall_seq_length=args.fall_seq_length,
         fall_stride=args.fall_stride,
-        overlap_threshold=args.overlap_threshold
+        overlap_threshold=args.overlap_threshold,
+        pure_fall=args.pure_fall
     )
     
     print(f"数据集大小: {len(full_dataset)}")
