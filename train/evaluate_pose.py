@@ -27,7 +27,7 @@ class PoseEvaluator:
         self.model_dir = model_dir
         self.device = device
         
-        # 加载训练配置和标准化参数
+        # 加载训练配置和标准化参
         self.load_config()
         
         # 初始化模型
@@ -131,7 +131,7 @@ class PoseEvaluator:
             pose_file: 3D姿态.npz文件路径
             
         Returns:
-            预测结果、置信度和每段的预测结果
+            预测结果、跌倒概率和每段的预测结果
         """
         # 加载姿态数据
         if not os.path.exists(pose_file):
@@ -155,26 +155,28 @@ class PoseEvaluator:
                 segment_probs.extend(outputs.cpu().numpy().flatten())
         
         # 获取每段的预测结果
-        segment_preds = [1 if p >= 0.5 else 0 for p in segment_probs]
+        # 模型输出高概率表示"正常"，所以跌倒概率 = 1 - 输出概率
+        fall_probs = [1 - p for p in segment_probs]
+        segment_preds = [1 if p >= 0.5 else 0 for p in fall_probs]
         
         # 计算整体预测结果
         # 策略: 如果任何一段预测为跌倒,则认为整个序列发生跌倒
         final_pred = 1 if any(segment_preds) else 0
         
-        # 计算整体置信度
-        # 策略: 使用最高的跌倒概率作为整体置信度
-        final_prob = max(segment_probs) if final_pred == 1 else 1 - max(segment_probs)
+        # 计算整体跌倒概率
+        # 策略: 使用最高的跌倒概率
+        final_prob = max(fall_probs)
         
         # 生成带帧范围的结果
         segment_results = []
-        for i, (pred, prob) in enumerate(zip(segment_preds, segment_probs)):
+        for i, (pred, prob) in enumerate(zip(segment_preds, fall_probs)):
             start_frame = i * self.seq_length
             end_frame = min((i + 1) * self.seq_length, total_frames)
             segment_results.append({
                 'start_frame': start_frame,
                 'end_frame': end_frame,
                 'prediction': pred,
-                'probability': prob
+                'fall_probability': prob  # 直接使用跌倒概率
             })
         
         return final_pred, final_prob, segment_results
@@ -207,14 +209,14 @@ def main():
         print(f"\n评估结果:")
         print(f"文件: {args.pose_file}")
         print(f"预测: {result}")
-        print(f"置信度: {prob:.4f}")
+        print(f"跌倒概率: {prob:.4f}")
         
         # 输出每段的预测结果
         print(f"\n分段预测结果:")
         for i, result in enumerate(segment_results):
             seg_result = "跌倒" if result['prediction'] == 1 else "正常"
             print(f"段 {i+1} (帧 {result['start_frame']}-{result['end_frame']}): "
-                  f"{seg_result} (置信度: {result['probability']:.4f})")
+                  f"{seg_result} (跌倒概率: {result['fall_probability']:.4f})")
         
     except Exception as e:
         print(f"错误: {str(e)}")
