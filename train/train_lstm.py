@@ -250,6 +250,12 @@ class PoseSequenceDataset(Dataset):
         
         print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
         print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
+        
+        # 保存标准化参数
+        save_dir = os.path.dirname(self.data_dir)
+        stats_file = os.path.join(save_dir, 'normalization_stats.npz')
+        np.savez(stats_file, mean=self.global_mean, std=self.global_std)
+        print(f"已保存标准化参数到: {stats_file}")
     
     def __len__(self):
         return len(self.samples)
@@ -615,7 +621,7 @@ def process_args():
     return args
 
 
-def save_training_summary(args, train_results, test_results, save_dir):
+def save_training_summary(args, train_results, test_results, save_dir, dataset):
     """
     保存训练参数和结果摘要为JSON格式
     
@@ -624,6 +630,7 @@ def save_training_summary(args, train_results, test_results, save_dir):
         train_results: 训练过程中的最佳结果
         test_results: 测试集评估结果
         save_dir: 保存目录
+        dataset: 数据集实例,用于获取标准化参数
     """
     # 提取需要保存的参数
     params = {
@@ -648,6 +655,10 @@ def save_training_summary(args, train_results, test_results, save_dir):
             "weight_decay": args.weight_decay,
             "l1_lambda": args.l1_lambda,
             "seed": args.seed
+        },
+        "normalization_params": {
+            "mean": dataset.global_mean.tolist(),
+            "std": dataset.global_std.tolist()
         }
     }
     
@@ -843,7 +854,8 @@ def main():
             args=args,
             train_results={"val_loss": float('inf'), "val_acc": 0.0, "epoch": 0},
             test_results=test_results,
-            save_dir=args.save_dir
+            save_dir=args.save_dir,
+            dataset=full_dataset
         )
         print("评估完成!")
         return
@@ -884,7 +896,8 @@ def main():
         args=args,
         train_results=best_val_results,
         test_results=test_results,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        dataset=full_dataset
     )
     print("评估完成!")
     
