@@ -614,7 +614,6 @@ def process_args():
     parser.add_argument('--save_dir', type=str, default=default_save_dir, help='模型保存目录')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
-    parser.add_argument('--test_only', action='store_true', help='仅测试模式')
     parser.add_argument('--checkpoint', type=str, default=None, help='加载checkpoint路径')
     
     args = parser.parse_args()
@@ -839,26 +838,6 @@ def main():
             print(f"从epoch {start_epoch}继续训练")
         else:
             print(f"警告: checkpoint文件不存在 - {args.checkpoint}")
-    
-    # 仅测试模式
-    if args.test_only:
-        if args.checkpoint is None:
-            print("错误: 测试模式需要提供checkpoint")
-            return
-        
-        print("开始模型评估...")
-        test_results = evaluate_model(model, test_loader, criterion, device, args.save_dir)
-        
-        # 保存测试结果摘要
-        summary = save_training_summary(
-            args=args,
-            train_results={"val_loss": float('inf'), "val_acc": 0.0, "epoch": 0},
-            test_results=test_results,
-            save_dir=args.save_dir,
-            dataset=full_dataset
-        )
-        print("评估完成!")
-        return
     
     # 训练模型
     print("开始训练模型...")
