@@ -246,48 +246,95 @@ class PoseSequenceDataset(Dataset):
                 
             total_frames = len(pose_data)
             
-            if has_fall == 0:
-                # 非跌倒视频：使用normal_stride
-                for start_idx in range(0, total_frames - self.normal_seq_length + 1, 
-                                     self.normal_stride):
-                    end_idx = start_idx + self.normal_seq_length
+            if has_fall == 0 or not self.pure_fall:
+                # 非跌倒视频或非pure_fall模式：使用normal_stride
+                if has_fall == 1:
+                    # 跌倒视频但非pure_fall模式：使用fall_stride和重叠阈值
+                    fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
+                    fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
+                    stride = self.fall_stride
+                    seq_length = self.fall_seq_length
+                else:
+                    # 非跌倒视频：使用normal_stride
+                    stride = self.normal_stride
+                    seq_length = self.normal_seq_length
+                
+                for start_idx in range(0, total_frames - seq_length + 1, stride):
+                    end_idx = start_idx + seq_length
                     if end_idx > total_frames:
                         break
                     
-                    self.samples.append({
-                        'video_id': video_id,
-                        'label': has_fall,
-                        'start_idx': start_idx,
-                        'end_idx': end_idx
-                    })
+                    if has_fall == 1:
+                        # 计算当前序列与跌倒片段的重叠长度
+                        overlap_start = max(start_idx, fall_start)
+                        overlap_end = min(end_idx, fall_end)
+                        overlap_length = max(0, overlap_end - overlap_start)
+                        
+                        # 计算重叠比例
+                        overlap_ratio = overlap_length / seq_length
+                        
+                        # 根据重叠比例判断标签
+                        label = 1 if overlap_ratio >= self.overlap_threshold else 0
+                        
+                        self.samples.append({
+                            'video_id': video_id,
+                            'label': label,
+                            'start_idx': start_idx,
+                            'end_idx': end_idx,
+                            'overlap_ratio': overlap_ratio
+                        })
+                    else:
+                        self.samples.append({
+                            'video_id': video_id,
+                            'label': has_fall,
+                            'start_idx': start_idx,
+                            'end_idx': end_idx
+                        })
             else:
-                # 跌倒视频：使用fall_stride
+                # pure_fall模式下的跌倒视频处理
                 fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
                 fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
                 
-                for start_idx in range(0, total_frames - self.fall_seq_length + 1,
-                                     self.fall_stride):
-                    end_idx = start_idx + self.fall_seq_length
-                    if end_idx > total_frames:
-                        break
-                    
-                    # 计算当前序列与跌倒片段的重叠长度
-                    overlap_start = max(start_idx, fall_start)
-                    overlap_end = min(end_idx, fall_end)
-                    overlap_length = max(0, overlap_end - overlap_start)
-                    
-                    # 计算重叠比例
-                    overlap_ratio = overlap_length / self.fall_seq_length
-                    
-                    # 根据重叠比例判断标签
-                    label = 1 if overlap_ratio >= self.overlap_threshold else 0
-                    
+                # 1. 添加跌倒前的非跌倒序列
+                if fall_start > self.normal_seq_length:
+                    for start_idx in range(0, fall_start - self.normal_seq_length + 1, 
+                                         self.normal_stride):
+                        end_idx = start_idx + self.normal_seq_length
+                        if end_idx > fall_start:
+                            break
+                            
+                        self.samples.append({
+                            'video_id': video_id,
+                            'label': 0,
+                            'start_idx': start_idx,
+                            'end_idx': end_idx
+                        })
+                
+                # 2. 添加完整的跌倒序列
+                fall_length = fall_end - fall_start
+                if fall_length >= self.fall_seq_length:
+                    # 如果跌倒片段长度足够，使用滑动窗口
+                    for start_idx in range(fall_start, fall_end - self.fall_seq_length + 1,
+                                         self.fall_stride):
+                        end_idx = start_idx + self.fall_seq_length
+                        if end_idx > fall_end:
+                            break
+                            
+                        self.samples.append({
+                            'video_id': video_id,
+                            'label': 1,
+                            'start_idx': start_idx,
+                            'end_idx': end_idx,
+                            'overlap_ratio': 1.0  # 纯跌倒片段
+                        })
+                else:
+                    # 如果跌倒片段不够长，将整个片段作为一个样本
                     self.samples.append({
                         'video_id': video_id,
-                        'label': label,
-                        'start_idx': start_idx,
-                        'end_idx': end_idx,
-                        'overlap_ratio': overlap_ratio
+                        'label': 1,
+                        'start_idx': fall_start,
+                        'end_idx': fall_end,
+                        'overlap_ratio': 1.0
                     })
         
         # 打印数据集统计信息
@@ -316,16 +363,23 @@ class PoseSequenceDataset(Dataset):
         end_idx = sample['end_idx']
         
         # 确保序列长度一致
-        if end_idx - start_idx < self.normal_seq_length:
-            padding_length = self.normal_seq_length - (end_idx - start_idx)
-            sequence = pose_data[start_idx:end_idx]
-            last_frame = sequence[-1:].repeat(padding_length, axis=0)
-            sequence = np.concatenate([sequence, last_frame], axis=0)
-        else:
-            sequence = pose_data[start_idx:start_idx + self.normal_seq_length]
+        sequence = pose_data[start_idx:end_idx]
         
-        # 展平每一帧的关键点数据
-        flattened_sequence = sequence.reshape(self.normal_seq_length, -1)
+        # 如果序列长度不足，使用重复填充
+        if len(sequence) < self.normal_seq_length:
+            # 先展平每一帧的关键点数据
+            flattened_sequence = sequence.reshape(len(sequence), -1)
+            # 计算需要填充的长度
+            padding_length = self.normal_seq_length - len(sequence)
+            # 复制最后一帧进行填充
+            last_frame = flattened_sequence[-1:]
+            padding = np.tile(last_frame, (padding_length, 1))
+            # 拼接原序列和填充序列
+            flattened_sequence = np.concatenate([flattened_sequence, padding], axis=0)
+        else:
+            # 如果序列长度足够，直接截取指定长度并展平
+            sequence = sequence[:self.normal_seq_length]
+            flattened_sequence = sequence.reshape(self.normal_seq_length, -1)
         
         # 使用Z-score标准化
         if self.transform:
@@ -618,7 +672,7 @@ def process_args():
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
-    parser.add_argument('--normal_stride', type=int, default=20, help='非跌倒视频滑动步长')
+    parser.add_argument('--normal_stride', type=int, default=30, help='非跌倒视频滑动步长')
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
@@ -629,7 +683,7 @@ def process_args():
     parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
     
     # 数据平衡参数
-    parser.add_argument('--balance_strategy', type=str, default='undersample', 
+    parser.add_argument('--balance_strategy', type=str, default='smote', 
                        choices=['none', 'oversample', 'undersample', 'smote'],
                        help='数据平衡策略')
     parser.add_argument('--target_ratio', type=float, default=1.0,
@@ -654,6 +708,8 @@ def process_args():
     parser.add_argument('--checkpoint', type=str, default=None, help='加载checkpoint路径')
     parser.add_argument('--overlap_threshold', type=float, default=0.3,
                        help='跌倒判定的重叠比例阈值(0-1之间),仅对跌倒视频有效')
+    parser.add_argument('--pure_fall', action='store_true',
+                       help='启用纯跌倒模式,从标签文件中读取跌倒片段起始帧')
     
     args = parser.parse_args()
     return args
@@ -761,7 +817,8 @@ def main():
         normal_stride=args.normal_stride,
         fall_seq_length=args.fall_seq_length,
         fall_stride=args.fall_stride,
-        overlap_threshold=args.overlap_threshold
+        overlap_threshold=args.overlap_threshold,
+        pure_fall=args.pure_fall
     )
     
     print(f"数据集大小: {len(full_dataset)}")
