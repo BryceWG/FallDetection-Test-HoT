@@ -176,18 +176,18 @@ class PoseSequenceDataset(Dataset):
     
     def fit_scaler(self, indices=None):
         """
-        Calculate mean and standard deviation for Z-score normalization
+        计算指定索引数据的均值和标准差，用于Z-score标准化
         
         Args:
-            indices: List of sample indices to use for calculation, if None use all samples
+            indices: 用于计算统计量的样本索引列表，如果为None则使用所有样本
         """
-        print("\nCalculating normalization statistics...")
+        print("\n计算标准化统计信息...")
         all_sequences = []
         
-        # Determine samples to process
+        # 确定要处理的样本
         samples_to_process = [self.samples[i] for i in indices] if indices is not None else self.samples
         
-        for sample in tqdm(samples_to_process, desc="Loading data"):
+        for sample in tqdm(samples_to_process, desc="加载数据"):
             pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
             if pose_data is None:
                 continue
@@ -200,44 +200,46 @@ class PoseSequenceDataset(Dataset):
             all_sequences.append(sequence)
             
         if not all_sequences:
-            raise ValueError("No valid sequences found for calculating statistics")
+            raise ValueError("没有找到有效的序列数据来计算统计量")
             
         all_data = np.concatenate(all_sequences, axis=0)
         self.global_mean = np.mean(all_data, axis=0)
         self.global_std = np.std(all_data, axis=0)
-        # Avoid division by zero
+        # 避免除零
         self.global_std[self.global_std < 1e-7] = 1.0
         
-        print(f"Global mean range: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
-        print(f"Global std range: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
+        print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
+        print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
     
     def _load_pose_data(self, video_id, has_fall):
-
-        if has_fall:
-            # 如果是跌倒视频,读取splits目录下的数据
-            npz_file = os.path.join(self.data_dir, video_id, 
-                                  'output_3D/splits/fall_keypoints_3d.npz')
-        else:
-            # 其他情况读取原始数据
-            npz_file = os.path.join(self.data_dir, video_id, 
-                                  'output_3D/output_keypoints_3d.npz')
+        """加载3D姿态数据
+        
+        Args:
+            video_id: 视频ID
+            has_fall: 是否为跌倒视频
+            
+        Returns:
+            numpy array: 3D姿态数据
+        """
+        # 统一使用output_keypoints_3d.npz
+        npz_file = os.path.join(self.data_dir, video_id, 
+                               'output_3D/output_keypoints_3d.npz')
             
         if not os.path.exists(npz_file):
-            print(f"Warning: File not found - {npz_file}")
+            print(f"警告: 找不到文件 {npz_file}")
             return None
             
         return np.load(npz_file, allow_pickle=True)['reconstruction']
     
     def _create_sequence_samples(self):
-        """Create sequence samples based on video type and overlap threshold"""
         self.samples = []
         
-        # Process all videos
+        # 遍历所有视频
         for _, row in self.labels_df.iterrows():
             video_id = row['video_id']
             has_fall = int(row['has_fall'])
             
-            # Load pose data
+            # 加载姿态数据
             pose_data = self._load_pose_data(video_id, has_fall)
             if pose_data is None:
                 continue
@@ -245,7 +247,7 @@ class PoseSequenceDataset(Dataset):
             total_frames = len(pose_data)
             
             if has_fall == 0:
-                # Non-fall video: use normal_stride
+                # 非跌倒视频：使用normal_stride
                 for start_idx in range(0, total_frames - self.normal_seq_length + 1, 
                                      self.normal_stride):
                     end_idx = start_idx + self.normal_seq_length
@@ -254,15 +256,14 @@ class PoseSequenceDataset(Dataset):
                     
                     self.samples.append({
                         'video_id': video_id,
-                        'label': 0,  # Non-fall sequence
+                        'label': has_fall,
                         'start_idx': start_idx,
                         'end_idx': end_idx
                     })
             else:
-                # Fall video: use fall_stride and check overlap
-                fall_start = int(row['fall_start_frame'])
-                fall_end = int(row['fall_end_frame'])
-                fall_duration = fall_end - fall_start + 1
+                # 跌倒视频：使用fall_stride
+                fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
+                fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
                 
                 for start_idx in range(0, total_frames - self.fall_seq_length + 1,
                                      self.fall_stride):
@@ -270,40 +271,36 @@ class PoseSequenceDataset(Dataset):
                     if end_idx > total_frames:
                         break
                     
-                    # Calculate overlap with fall segment
+                    # 计算当前序列与跌倒片段的重叠长度
                     overlap_start = max(start_idx, fall_start)
                     overlap_end = min(end_idx, fall_end)
+                    overlap_length = max(0, overlap_end - overlap_start)
                     
-                    if overlap_start <= overlap_end:
-                        # There is overlap with fall segment
-                        overlap_length = overlap_end - overlap_start + 1
-                        overlap_ratio = overlap_length / self.fall_seq_length
-                        
-                        # Label as fall if overlap ratio exceeds threshold
-                        is_fall = overlap_ratio >= self.overlap_threshold
-                    else:
-                        # No overlap with fall segment
-                        is_fall = False
+                    # 计算重叠比例
+                    overlap_ratio = overlap_length / self.fall_seq_length
+                    
+                    # 根据重叠比例判断标签
+                    label = 1 if overlap_ratio >= self.overlap_threshold else 0
                     
                     self.samples.append({
                         'video_id': video_id,
-                        'label': 1 if is_fall else 0,
+                        'label': label,
                         'start_idx': start_idx,
                         'end_idx': end_idx,
-                        'overlap_ratio': overlap_ratio if overlap_start <= overlap_end else 0.0
+                        'overlap_ratio': overlap_ratio
                     })
         
-        # Print dataset statistics
+        # 打印数据集统计信息
         total_samples = len(self.samples)
         fall_samples = sum(1 for sample in self.samples if sample['label'] == 1)
         non_fall_samples = total_samples - fall_samples
         
-        print(f"\nDataset Statistics:")
-        print(f"Total samples: {total_samples}")
-        print(f"Fall samples: {fall_samples}")
-        print(f"Non-fall samples: {non_fall_samples}")
+        print(f"\n数据集统计信息:")
+        print(f"总样本数: {total_samples}")
+        print(f"跌倒样本数: {fall_samples}")
+        print(f"非跌倒样本数: {non_fall_samples}")
         if total_samples > 0:
-            print(f"Fall/Non-fall ratio: {fall_samples/non_fall_samples:.2f}")
+            print(f"跌倒/非跌倒比例: {fall_samples/non_fall_samples:.2f}")
     
     def __len__(self):
         return len(self.samples)
@@ -311,14 +308,14 @@ class PoseSequenceDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        # Load 3D pose data
+        # 加载3D姿态数据
         pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
         
-        # Extract specified range of sequence
+        # 截取指定范围的序列
         start_idx = sample['start_idx']
         end_idx = sample['end_idx']
         
-        # Ensure sequence length is consistent
+        # 确保序列长度一致
         if end_idx - start_idx < self.normal_seq_length:
             padding_length = self.normal_seq_length - (end_idx - start_idx)
             sequence = pose_data[start_idx:end_idx]
@@ -327,18 +324,18 @@ class PoseSequenceDataset(Dataset):
         else:
             sequence = pose_data[start_idx:start_idx + self.normal_seq_length]
         
-        # Flatten each frame's keypoint data
+        # 展平每一帧的关键点数据
         flattened_sequence = sequence.reshape(self.normal_seq_length, -1)
         
-        # Apply Z-score normalization
+        # 使用Z-score标准化
         if self.transform:
             flattened_sequence = self.transform(flattened_sequence)
         elif self.global_mean is not None and self.global_std is not None:
             flattened_sequence = (flattened_sequence - self.global_mean) / self.global_std
         else:
-            raise RuntimeError("Must call fit_scaler before using dataset")
+            raise RuntimeError("在使用数据集之前必须调用fit_scaler来计算标准化参数")
         
-        # Convert to tensor
+        # 转换为tensor
         sequence_tensor = torch.FloatTensor(flattened_sequence)
         label_tensor = torch.FloatTensor([sample['label']])
         
@@ -352,7 +349,7 @@ class PoseSequenceDataset(Dataset):
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, save_dir='./checkpoints/fall_detection'):
     """
-    Train model
+    训练模型
     """
     os.makedirs(save_dir, exist_ok=True)
     
@@ -362,11 +359,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     train_accs = []
     val_accs = []
     
-    # Initialize early stopping
+    # 初始化早停
     early_stopping = EarlyStopping(patience=10, verbose=True)
     
     for epoch in range(num_epochs):
-        # Training phase
+        # 训练阶段
         model.train()
         train_loss = 0.0
         train_correct = 0
@@ -377,16 +374,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             sequences = batch['sequence'].to(device)
             labels = batch['label'].to(device)
             
-            # Forward pass
+            # 前向传播
             outputs = model(sequences)
             loss = criterion(outputs, labels)
             
-            # Backward pass and optimization
+            # 反向传播和优化
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            # Statistics
+            # 统计
             train_loss += loss.item() * sequences.size(0)
             pred = (outputs >= 0.5).float()
             train_correct += (pred == labels).sum().item()
@@ -399,7 +396,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         train_losses.append(train_loss)
         train_accs.append(train_acc)
             
-        # Validation phase
+        # 验证阶段
         model.eval()
         val_loss = 0.0
         val_correct = 0
@@ -413,11 +410,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 sequences = batch['sequence'].to(device)
                 labels = batch['label'].to(device)
                 
-                # Forward pass
+                # 前向传播
                 outputs = model(sequences)
                 loss = criterion(outputs, labels)
                 
-                # Statistics
+                # 统计
                 val_loss += loss.item() * sequences.size(0)
                 pred = (outputs >= 0.5).float()
                 val_correct += (pred == labels).sum().item()
@@ -433,14 +430,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_losses.append(val_loss)
         val_accs.append(val_acc)
         
-        # Learning rate adjustment
+        # 学习率调整
         if scheduler:
             scheduler.step(val_loss)
         
-        # Early stopping check
+        # 早停检查
         early_stopping(val_loss, model)
         
-        # Save best model
+        # 保存最佳模型
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
@@ -451,14 +448,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 'val_acc': val_acc
             }, os.path.join(save_dir, 'best_model.pth'))
             
-            print(f"Saving best model, validation loss: {val_loss:.4f}, validation accuracy: {val_acc:.4f}")
+            print(f"保存最佳模型, 验证损失: {val_loss:.4f}, 验证准确率: {val_acc:.4f}")
         
-        # Print metrics at the end of each epoch
+        # 每个epoch结束后显示指标
         print(f"Epoch {epoch+1}/{num_epochs} - "
-              f"Training loss: {train_loss:.4f}, Training accuracy: {train_acc:.4f}, "
-              f"Validation loss: {val_loss:.4f}, Validation accuracy: {val_acc:.4f}")
+              f"训练损失: {train_loss:.4f}, 训练准确率: {train_acc:.4f}, "
+              f"验证损失: {val_loss:.4f}, 验证准确率: {val_acc:.4f}")
         
-        # Save model every 10 epochs
+        # 每10个epoch保存一次
         if (epoch + 1) % 10 == 0:
             torch.save({
                 'epoch': epoch,
@@ -472,13 +469,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 'val_accs': val_accs
             }, os.path.join(save_dir, f'model_epoch_{epoch+1}.pth'))
         
-        # If early stopping is triggered, restore best model and stop training
+        # 如果触发早停，恢复最佳模型并结束训练
         if early_stopping.early_stop:
-            print("Early stopping triggered, restoring best model")
+            print("早停触发，恢复最佳模型")
             model.load_state_dict(early_stopping.best_model)
             break
     
-    # Save training history
+    # 保存训练历史
     history = {
         'train_losses': train_losses,
         'val_losses': val_losses,
@@ -489,7 +486,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     with open(os.path.join(save_dir, 'training_history.pkl'), 'wb') as f:
         pickle.dump(history, f)
     
-    # Plot training curves
+    # 绘制训练曲线
     plot_training_history(history, save_dir)
     
     return model, history
@@ -612,50 +609,58 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
     return results
 
 def process_args():
-    """Process command line arguments"""
-    parser = argparse.ArgumentParser(description='Train fall detection LSTM model')
+    """
+    处理命令行参数
+    """
+    parser = argparse.ArgumentParser(description='跌倒检测模型训练')
+    parser.add_argument('--data_dir', type=str, default='./demo/output/', help='3D姿态数据目录')
+    parser.add_argument('--label_file', type=str, required=False, help='标签文件路径(CSV格式)')
     
-    # Data parameters
-    parser.add_argument('--data_dir', type=str, default='./demo/output',
-                        help='Directory containing pose data')
-    parser.add_argument('--label_file', type=str, required=True,
-                        help='Path to label file (CSV)')
-    parser.add_argument('--normal_seq_length', type=int, default=30,
-                        help='Sequence length for non-fall videos')
-    parser.add_argument('--normal_stride', type=int, default=20,
-                        help='Stride for non-fall videos')
-    parser.add_argument('--fall_seq_length', type=int, default=30,
-                        help='Sequence length for fall videos')
-    parser.add_argument('--fall_stride', type=int, default=15,
-                        help='Stride for fall videos')
+    # 非跌倒视频的序列参数
+    parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
+    parser.add_argument('--normal_stride', type=int, default=20, help='非跌倒视频滑动步长')
+    
+    # 跌倒视频的序列参数
+    parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
+    parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
+    
+    # 数据集划分参数
+    parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
+    
+    # 数据平衡参数
+    parser.add_argument('--balance_strategy', type=str, default='undersample', 
+                       choices=['none', 'oversample', 'undersample', 'smote'],
+                       help='数据平衡策略')
+    parser.add_argument('--target_ratio', type=float, default=1.0,
+                       help='目标类别比例(跌倒:非跌倒),仅在balance_strategy不为none时有效')
+    
+    # 模型参数
+    parser.add_argument('--batch_size', type=int, default=16, help='批大小')
+    parser.add_argument('--num_epochs', type=int, default=80, help='训练轮数')
+    parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2正则化系数')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
+    parser.add_argument('--num_layers', type=int, default=2, help='LSTM层数')
+    parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
+    
+    # 生成带时间戳的保存目录
+    timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
+    default_save_dir = f'./checkpoint/fall_detection_lstm/{timestamp}'
+    
+    parser.add_argument('--save_dir', type=str, default=default_save_dir, help='模型保存目录')
+    parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
+    parser.add_argument('--seed', type=int, default=42, help='随机种子')
+    parser.add_argument('--checkpoint', type=str, default=None, help='加载checkpoint路径')
     parser.add_argument('--overlap_threshold', type=float, default=0.3,
-                        help='Overlap ratio threshold for fall detection')
+                       help='跌倒判定的重叠比例阈值(0-1之间),仅对跌倒视频有效')
     
-    # Model parameters
-    parser.add_argument('--hidden_dim', type=int, default=128,
-                        help='Hidden dimension of LSTM')
-    parser.add_argument('--num_layers', type=int, default=2,
-                        help='Number of LSTM layers')
-    parser.add_argument('--dropout', type=float, default=0.2,
-                        help='Dropout rate')
-    
-    # Training parameters
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size')
-    parser.add_argument('--num_epochs', type=int, default=100,
-                        help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=0.001,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.0001,
-                        help='Weight decay')
-    parser.add_argument('--gpu', type=str, default='0',
-                        help='GPU ID')
-    
-    return parser.parse_args()
+    args = parser.parse_args()
+    return args
 
 def save_training_summary(args, train_results, test_results, save_dir, dataset):
 
-    # Extract parameters to save
+    # 提取需要保存的参数
     params = {
         "data_params": {
             "data_dir": args.data_dir,
@@ -663,8 +668,8 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
             "normal_stride": args.normal_stride,
             "fall_seq_length": args.fall_seq_length,
             "fall_stride": args.fall_stride,
-            "test_ratio": 0.25,
-            "val_ratio": 0.25
+            "test_ratio": args.test_ratio,
+            "val_ratio": args.val_ratio
         },
         "model_params": {
             "hidden_dim": args.hidden_dim,
@@ -676,7 +681,7 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
             "num_epochs": args.num_epochs,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
-            "seed": 42
+            "seed": args.seed
         },
         "normalization_params": {
             "mean": dataset.global_mean.tolist(),
@@ -684,14 +689,14 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
         }
     }
     
-    # Extract training results
+    # 提取训练结果
     train_summary = {
         "best_val_loss": float(train_results["val_loss"]),
         "best_val_accuracy": float(train_results["val_acc"]),
         "best_epoch": train_results["epoch"]
     }
     
-    # Extract test results
+    # 提取测试结果
     test_summary = {
         "test_loss": float(test_results["test_loss"]),
         "classification_report": {
@@ -700,7 +705,7 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
         }
     }
     
-    # Combine all information
+    # 合并所有信息
     summary = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "parameters": params,
@@ -708,97 +713,134 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
         "test_results": test_summary
     }
     
-    # Save as JSON file
+    # 保存为JSON文件
     summary_file = os.path.join(save_dir, "training_summary.json")
     with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4, ensure_ascii=False)
     
-    print(f"\nTraining summary saved to: {summary_file}")
+    print(f"\n训练摘要已保存至: {summary_file}")
     return summary
 
 def main():
 
     args = process_args()
     
-    # Set random seed
-    np.random.seed(42)
-    torch.manual_seed(42)
+    # 设置随机种子
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = True
     
-    # Set device
+    # 设置设备
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"使用设备: {device}")
     
-    # Create dataset
+    # 创建数据集
     if os.path.exists(args.label_file):
-        print(f"Loading label file: {args.label_file}")
+        print(f"加载标签文件: {args.label_file}")
     else:
-        print(f"Error: Label file not found - {args.label_file}")
+        print(f"错误: 标签文件不存在 - {args.label_file}")
         return
     
-    # Check data directory
+    # 检查数据目录
     if not os.path.exists(args.data_dir):
-        print(f"Error: Data directory not found - {args.data_dir}")
+        print(f"错误: 数据目录不存在 - {args.data_dir}")
         return
     
-    # Create save directory
+    # 创建保存目录
     os.makedirs(args.save_dir, exist_ok=True)
     
-    # Create dataset and loader
-    print("Creating dataset...")
+    # 创建数据集和加载器
+    print("创建数据集...")
     full_dataset = PoseSequenceDataset(
         data_dir=args.data_dir,
         label_file=args.label_file,
         normal_seq_length=args.normal_seq_length,
         normal_stride=args.normal_stride,
         fall_seq_length=args.fall_seq_length,
-        fall_stride=args.fall_stride
+        fall_stride=args.fall_stride,
+        overlap_threshold=args.overlap_threshold
     )
     
-    print(f"Dataset size: {len(full_dataset)}")
+    print(f"数据集大小: {len(full_dataset)}")
     
-    # Split into training and test sets
+    # 划分训练集和测试集
     train_indices, test_indices = train_test_split(
         range(len(full_dataset)),
-        test_size=0.25,
-        stratify=full_dataset._raw_labels,  # Use cached labels
-        random_state=42
+        test_size=args.test_ratio,
+        stratify=full_dataset._raw_labels,  # 使用缓存的标签
+        random_state=args.seed
     )
     
-    # Split training set into training and validation sets
+    # 划分训练集和验证集
     train_indices, val_indices = train_test_split(
         train_indices,
-        test_size=0.25,
-        stratify=[full_dataset._raw_labels[i] for i in train_indices],  # Use cached labels
-        random_state=42
+        test_size=args.val_ratio,
+        stratify=[full_dataset._raw_labels[i] for i in train_indices],  # 使用缓存的标签
+        random_state=args.seed
     )
     
-    # Calculate normalization parameters using training set
+    # 使用训练集数据计算标准化参数
     full_dataset.fit_scaler(train_indices)
     
     train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
     val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
     test_dataset = torch.utils.data.Subset(full_dataset, test_indices)
     
-    print(f"Training set size: {len(train_dataset)}")
-    print(f"Validation set size: {len(val_dataset)}")
-    print(f"Test set size: {len(test_dataset)}")
+    print(f"训练集大小: {len(train_dataset)}")
+    print(f"验证集大小: {len(val_dataset)}")
+    print(f"测试集大小: {len(test_dataset)}")
     
-    # Create data loaders
-    print("\nCreating data loaders...")
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    # 创建数据加载器
+    print("\n创建数据加载器...")
+    
+    if args.balance_strategy != 'none':
+        # 使用数据平衡策略
+        # 计算目标样本数
+        train_labels = [train_dataset[i]['label'].item() for i in range(len(train_dataset))]
+        label_counts = Counter(train_labels)
+        
+        if args.target_ratio != 1.0:
+            # 使用自定义比例
+            max_count = max(label_counts.values())
+            target_counts = {
+                0: int(max_count),  # 非跌倒类保持不变
+                1: int(max_count * args.target_ratio)  # 跌倒类根据比例调整
+            }
+        else:
+            # 自动平衡到相同数量
+            target_counts = 'auto'
+            
+        print(f"\n使用{args.balance_strategy}策略平衡数据...")
+        train_loader = create_balanced_loader(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            strategy=args.balance_strategy,
+            sampling_strategy=target_counts,
+            shuffle=True,
+            num_workers=4
+        )
+    else:
+        # 使用原始数据加载器
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=4
+        )
+    
+    # 验证集和测试集不需要平衡
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
-    # Calculate input feature dimension (number of keypoints * 3)
+    # 计算输入特征维度(姿态关键点数量 * 3)
     sample_item = full_dataset[0]
     input_dim = sample_item['sequence'].shape[1]
-    print(f"Input feature dimension: {input_dim}")
+    print(f"输入特征维度: {input_dim}")
     
-    # Create model
+    # 创建模型
     model = FallDetectionLSTM(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
@@ -808,26 +850,26 @@ def main():
     
     print(model)
     
-    # Define loss function and optimizer
+    # 定义损失函数和优化器
     criterion = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
     
-    # Load checkpoint (if available)
+    # 加载checkpoint(如果有)
     start_epoch = 0
     if args.checkpoint:
         if os.path.exists(args.checkpoint):
-            print(f"Loading checkpoint: {args.checkpoint}")
+            print(f"加载checkpoint: {args.checkpoint}")
             checkpoint = torch.load(args.checkpoint)
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             start_epoch = checkpoint.get('epoch', 0) + 1
-            print(f"Resuming training from epoch {start_epoch}")
+            print(f"从epoch {start_epoch}继续训练")
         else:
-            print(f"Warning: Checkpoint file not found - {args.checkpoint}")
+            print(f"警告: checkpoint文件不存在 - {args.checkpoint}")
     
-    # Train model
-    print("\nStarting training...")
+    # 训练模型
+    print("\n开始训练...")
     model, history = train_model(
         model=model,
         train_loader=train_loader,
@@ -839,9 +881,9 @@ def main():
         scheduler=scheduler,
         save_dir=args.save_dir
     )
-    print("Training completed!")
+    print("训练完成!")
     
-    # Load best model for testing
+    # 加载最佳模型进行测试
     best_model_path = os.path.join(args.save_dir, 'best_model.pth')
     if os.path.exists(best_model_path):
         checkpoint = torch.load(best_model_path)
@@ -852,11 +894,11 @@ def main():
             "epoch": checkpoint['epoch']
         }
     
-    # Evaluate model
-    print("Evaluating model...")
+    # 评估模型
+    print("开始模型评估...")
     test_results = evaluate_model(model, test_loader, criterion, device, args.save_dir)
     
-    # Save training summary
+    # 保存训练摘要
     summary = save_training_summary(
         args=args,
         train_results=best_val_results,
@@ -864,7 +906,7 @@ def main():
         save_dir=args.save_dir,
         dataset=full_dataset
     )
-    print("Evaluation completed!")
+    print("评估完成!")
     
     return model, history, test_results, summary
     
