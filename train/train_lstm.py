@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# python train/train_lstm.py --label_file fall_frame_data.csv
+# python train/train_lstm.py --label_file train/full_frame.csv
 import os
 import sys
 import glob
@@ -52,7 +52,6 @@ class EarlyStopping:
             self.best_model = copy.deepcopy(model.state_dict())
             self.counter = 0
 
-
 class FallDetectionLSTM(nn.Module):
     """基于LSTM的跌倒检测模型
     输入: 姿态序列数据 [batch_size, sequence_length, feature_dim]
@@ -81,12 +80,10 @@ class FallDetectionLSTM(nn.Module):
             nn.Linear(64, 1)
         )
         
-        # 分类层 - 调整维度以适应单向LSTM
+        # 分类层 - 简化结构并添加BatchNorm
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, 128),  # 输入维度减半
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 64),
+            nn.Linear(hidden_dim, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, 1),
@@ -109,6 +106,45 @@ class FallDetectionLSTM(nn.Module):
         
         return output
 
+class FocalLoss(nn.Module):
+    """Focal Loss for dealing with class imbalance
+    
+    Args:
+        alpha (float): 平衡因子，用于处理类别不平衡
+        gamma (float): 聚焦参数，用于降低易分类样本的权重
+    """
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        
+    def forward(self, pred, target):
+        # 确保数值稳定性
+        eps = 1e-7
+        pred = torch.clamp(pred, eps, 1 - eps)
+        
+        # 计算交叉熵
+        ce = -target * torch.log(pred) - (1 - target) * torch.log(1 - pred)
+        
+        # 计算focal weight
+        p_t = target * pred + (1 - target) * (1 - pred)
+        alpha_t = target * self.alpha + (1 - target) * (1 - self.alpha)
+        weight = alpha_t * (1 - p_t).pow(self.gamma)
+        
+        # 计算最终损失
+        loss = weight * ce
+        return loss.mean()
+
+class LabelSmoothingBCELoss(nn.Module):
+    """带标签平滑的二分类交叉熵损失"""
+    def __init__(self, smoothing=0.1):
+        super().__init__()
+        self.smoothing = smoothing
+        
+    def forward(self, pred, target):
+        # 将目标值从 [0, 1] 平滑到 [smoothing, 1-smoothing]
+        smooth_target = target * (1 - self.smoothing) + 0.5 * self.smoothing
+        return nn.functional.binary_cross_entropy(pred, smooth_target)
 
 class PoseSequenceDataset(Dataset):
     """姿态序列数据集
@@ -795,7 +831,7 @@ def main():
     print(model)
     
     # 定义损失函数和优化器
-    criterion = nn.BCELoss()
+    criterion = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
     
