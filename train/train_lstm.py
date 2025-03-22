@@ -24,17 +24,8 @@ from data_balancer import create_balanced_loader
 
 sys.path.append(os.getcwd())
 
-
 class EarlyStopping:
-    """早停策略
-    
-    当验证集性能在patience个epoch内没有改善时，提前结束训练
-    
-    Args:
-        patience (int): 等待改善的epoch数
-        min_delta (float): 最小改善幅度，小于此值视为没有改善
-        verbose (bool): 是否打印早停信息
-    """
+
     def __init__(self, patience=10, min_delta=0, verbose=True):
         self.patience = patience
         self.min_delta = min_delta
@@ -63,8 +54,7 @@ class EarlyStopping:
 
 
 class FallDetectionLSTM(nn.Module):
-    """
-    基于LSTM的跌倒检测模型
+    """基于LSTM的跌倒检测模型
     输入: 姿态序列数据 [batch_size, sequence_length, feature_dim]
     输出: 二分类结果 [batch_size, 1]
     """
@@ -74,26 +64,26 @@ class FallDetectionLSTM(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         
-        # LSTM层
+        # 单向LSTM层
         self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
-            bidirectional=True
+            bidirectional=False  # 改为单向LSTM
         )
         
-        # 注意力机制
+        # 注意力机制 - 调整维度以适应单向LSTM
         self.attention = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
+            nn.Linear(hidden_dim, 64),  # 输入维度减半
             nn.Tanh(),
-            nn.Linear(128, 1)
+            nn.Linear(64, 1)
         )
         
-        # 分类层
+        # 分类层 - 调整维度以适应单向LSTM
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
+            nn.Linear(hidden_dim, 128),  # 输入维度减半
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(128, 64),
@@ -102,53 +92,90 @@ class FallDetectionLSTM(nn.Module):
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
-
+    
     def forward(self, x):
-        # x shape: [batch_size, seq_len, input_dim]
-        
-        # LSTM forward
-        lstm_out, _ = self.lstm(x)
-        # lstm_out shape: [batch_size, seq_len, hidden_dim * 2]
+        # LSTM前向传播
+        lstm_out, _ = self.lstm(x)  # [batch_size, seq_len, hidden_dim]
         
         # 注意力机制
-        attention_weights = self.attention(lstm_out)
+        attention_weights = self.attention(lstm_out)  # [batch_size, seq_len, 1]
         attention_weights = torch.softmax(attention_weights, dim=1)
         
-        # 加权平均
-        context_vector = torch.sum(lstm_out * attention_weights, dim=1)
+        # 加权求和得到上下文向量
+        context = torch.sum(attention_weights * lstm_out, dim=1)  # [batch_size, hidden_dim]
         
-        # 分类预测
-        output = self.classifier(context_vector)
+        # 分类
+        output = self.classifier(context)  # [batch_size, 1]
         
         return output
 
 
 class PoseSequenceDataset(Dataset):
-    """
-    姿态序列数据集
+    """姿态序列数据集
     加载3D姿态数据和对应的标签
     """
     def __init__(self, data_dir, label_file, normal_seq_length=30, normal_stride=20,
-                 fall_seq_length=30, fall_stride=15, transform=None, test_mode=False):
+                 fall_seq_length=30, fall_stride=15, overlap_threshold=0.3,
+                 transform=None, test_mode=False, pure_fall=False):
         self.data_dir = data_dir
         self.normal_seq_length = normal_seq_length
         self.normal_stride = normal_stride
         self.fall_seq_length = fall_seq_length
         self.fall_stride = fall_stride
+        self.overlap_threshold = overlap_threshold
         self.transform = transform
         self.test_mode = test_mode
+        self.pure_fall = pure_fall
         
         # 加载标签数据
         self.labels_df = pd.read_csv(label_file)
         
         # 创建数据索引
         self._create_sequence_samples()
-        self._compute_global_stats()
+        
+        # 初始化标准化参数（将在fit_scaler中设置）
+        self.global_mean = None
+        self.global_std = None
+    
+    def fit_scaler(self, indices=None):
+        """
+        计算指定索引数据的均值和标准差，用于Z-score标准化
+        
+        Args:
+            indices: 用于计算统计量的样本索引列表，如果为None则使用所有样本
+        """
+        print("\n计算标准化统计信息...")
+        all_sequences = []
+        
+        # 确定要处理的样本
+        samples_to_process = [self.samples[i] for i in indices] if indices is not None else self.samples
+        
+        for sample in tqdm(samples_to_process, desc="加载数据"):
+            pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
+            if pose_data is None:
+                continue
+                
+            start_idx = sample['start_idx']
+            end_idx = sample['end_idx']
+            
+            sequence = pose_data[start_idx:end_idx]
+            sequence = sequence.reshape(len(sequence), -1)
+            all_sequences.append(sequence)
+            
+        if not all_sequences:
+            raise ValueError("没有找到有效的序列数据来计算统计量")
+            
+        all_data = np.concatenate(all_sequences, axis=0)
+        self.global_mean = np.mean(all_data, axis=0)
+        self.global_std = np.std(all_data, axis=0)
+        # 避免除零
+        self.global_std[self.global_std < 1e-7] = 1.0
+        
+        print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
+        print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
     
     def _load_pose_data(self, video_id, has_fall):
-        """
-        根据视频ID和是否包含跌倒加载对应的姿态数据
-        """
+
         if has_fall:
             # 如果是跌倒视频,读取splits目录下的数据
             npz_file = os.path.join(self.data_dir, video_id, 
@@ -165,9 +192,7 @@ class PoseSequenceDataset(Dataset):
         return np.load(npz_file, allow_pickle=True)['reconstruction']
     
     def _create_sequence_samples(self):
-        """
-        创建序列样本索引
-        """
+
         self.samples = []
         
         # 遍历所有视频
@@ -223,40 +248,6 @@ class PoseSequenceDataset(Dataset):
         if total_samples > 0:
             print(f"跌倒/非跌倒比例: {fall_samples/non_fall_samples:.2f}")
     
-    def _compute_global_stats(self):
-        """
-        计算所有训练数据的均值和标准差，用于Z-score标准化
-        """
-        print("\n计算全局统计信息...")
-        all_sequences = []
-        
-        for sample in tqdm(self.samples, desc="加载数据"):
-            pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
-            if pose_data is None:
-                continue
-                
-            start_idx = sample['start_idx']
-            end_idx = sample['end_idx']
-            
-            sequence = pose_data[start_idx:end_idx]
-            sequence = sequence.reshape(len(sequence), -1)
-            all_sequences.append(sequence)
-            
-        all_data = np.concatenate(all_sequences, axis=0)
-        self.global_mean = np.mean(all_data, axis=0)
-        self.global_std = np.std(all_data, axis=0)
-        # 避免除零
-        self.global_std[self.global_std < 1e-7] = 1.0
-        
-        print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
-        print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
-        
-        # 保存标准化参数
-        save_dir = os.path.dirname(self.data_dir)
-        stats_file = os.path.join(save_dir, 'normalization_stats.npz')
-        np.savez(stats_file, mean=self.global_mean, std=self.global_std)
-        print(f"已保存标准化参数到: {stats_file}")
-    
     def __len__(self):
         return len(self.samples)
     
@@ -285,8 +276,10 @@ class PoseSequenceDataset(Dataset):
         # 使用Z-score标准化
         if self.transform:
             flattened_sequence = self.transform(flattened_sequence)
-        else:
+        elif self.global_mean is not None and self.global_std is not None:
             flattened_sequence = (flattened_sequence - self.global_mean) / self.global_std
+        else:
+            raise RuntimeError("在使用数据集之前必须调用fit_scaler来计算标准化参数")
         
         # 转换为tensor
         sequence_tensor = torch.FloatTensor(flattened_sequence)
@@ -300,11 +293,8 @@ class PoseSequenceDataset(Dataset):
             'end_idx': end_idx
         }
 
-
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, l1_lambda=0, save_dir='./checkpoints/fall_detection'):
-    """
-    训练模型
-    """
+
     os.makedirs(save_dir, exist_ok=True)
     
     best_val_loss = float('inf')
@@ -450,7 +440,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     
     return model, history
 
-
 def plot_training_history(history, save_dir):
     """
     Plot training history curves
@@ -480,7 +469,6 @@ def plot_training_history(history, save_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'training_history.png'))
     plt.close()
-
 
 def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoints/fall_detection'):
     """
@@ -569,7 +557,6 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
     
     return results
 
-
 def process_args():
     """
     处理命令行参数
@@ -587,11 +574,11 @@ def process_args():
     parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
     
     # 数据集划分参数
-    parser.add_argument('--test_ratio', type=float, default=0.2, help='测试集占总数据的比例')
-    parser.add_argument('--val_ratio', type=float, default=0.2, help='验证集占训练数据的比例')
+    parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
+    parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
     
     # 数据平衡参数
-    parser.add_argument('--balance_strategy', type=str, default='none', 
+    parser.add_argument('--balance_strategy', type=str, default='undersample', 
                        choices=['none', 'oversample', 'undersample', 'smote'],
                        help='数据平衡策略')
     parser.add_argument('--target_ratio', type=float, default=1.0,
@@ -619,18 +606,8 @@ def process_args():
     args = parser.parse_args()
     return args
 
-
 def save_training_summary(args, train_results, test_results, save_dir, dataset):
-    """
-    保存训练参数和结果摘要为JSON格式
-    
-    Args:
-        args: 训练参数
-        train_results: 训练过程中的最佳结果
-        test_results: 测试集评估结果
-        save_dir: 保存目录
-        dataset: 数据集实例,用于获取标准化参数
-    """
+
     # 提取需要保存的参数
     params = {
         "data_params": {
@@ -693,11 +670,8 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
     print(f"\n训练摘要已保存至: {summary_file}")
     return summary
 
-
 def main():
-    """
-    主函数
-    """
+
     args = process_args()
     
     # 设置随机种子
@@ -755,6 +729,9 @@ def main():
         stratify=[full_dataset[i]['label'].item() for i in train_indices],
         random_state=args.seed
     )
+    
+    # 使用训练集数据计算标准化参数
+    full_dataset.fit_scaler(train_indices)
     
     train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
     val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
@@ -882,6 +859,5 @@ def main():
     
     return model, history, test_results, summary
     
-
 if __name__ == "__main__":
     main()
