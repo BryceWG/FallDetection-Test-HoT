@@ -190,11 +190,12 @@ class PoseEvaluator:
         segments = np.stack(segments, axis=0)
         return torch.FloatTensor(segments)
         
-    def evaluate(self, pose_file):
+    def evaluate(self, pose_file, reverse=False):
         """评估单个姿态文件
         
         Args:
             pose_file: 3D姿态.npz文件路径
+            reverse: 是否反转输入数据的时间顺序
             
         Returns:
             预测结果、跌倒概率和每段的预测结果
@@ -204,6 +205,12 @@ class PoseEvaluator:
             raise FileNotFoundError(f"找不到姿态文件: {pose_file}")
             
         pose_data = np.load(pose_file, allow_pickle=True)['reconstruction']
+        
+        # 如果需要，反转时间顺序
+        if reverse:
+            pose_data = pose_data[::-1]
+            print("已反转输入数据的时间顺序")
+            
         total_frames = len(pose_data)
         
         # 预处理数据
@@ -305,7 +312,7 @@ class FallDetectionOnVideo:
         # 6. 进行跌倒检测
         if self.evaluator:
             print(f"⏳ 进行跌倒检测...")
-            pred, prob, segment_results = self.evaluator.evaluate(output_3d_file)
+            pred, prob, segment_results = self.evaluator.evaluate(output_3d_file, reverse=self.args.reverse)
             
             # 输出检测结果
             result = "跌倒" if pred == 1 else "正常"
@@ -484,6 +491,10 @@ def parse_args():
                       help='选择人体检测器')
     parser.add_argument('--batch_size', type=int, default=2000,
                       help='帧分组大小，默认为2000帧')
+    
+    # 跌倒检测参数
+    parser.add_argument('--reverse', action='store_true',
+                      help='反转输入数据的时间顺序')
     
     args = parser.parse_args()
     return args
