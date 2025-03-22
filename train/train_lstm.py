@@ -136,6 +136,7 @@ class PoseSequenceDataset(Dataset):
         # 初始化标准化参数（将在fit_scaler中设置）
         self.global_mean = None
         self.global_std = None
+        self._raw_labels = [sample['label'] for sample in self.samples]  # 缓存标签
     
     def fit_scaler(self, indices=None):
         """
@@ -293,8 +294,10 @@ class PoseSequenceDataset(Dataset):
             'end_idx': end_idx
         }
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, l1_lambda=0, save_dir='./checkpoints/fall_detection'):
-
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, save_dir='./checkpoints/fall_detection'):
+    """
+    训练模型
+    """
     os.makedirs(save_dir, exist_ok=True)
     
     best_val_loss = float('inf')
@@ -321,11 +324,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             # 前向传播
             outputs = model(sequences)
             loss = criterion(outputs, labels)
-            
-            # 添加L1正则化
-            if l1_lambda > 0:
-                l1_norm = sum(p.abs().sum() for p in model.parameters())
-                loss = loss + l1_lambda * l1_norm
             
             # 反向传播和优化
             optimizer.zero_grad()
@@ -584,12 +582,11 @@ def process_args():
     parser.add_argument('--target_ratio', type=float, default=1.0,
                        help='目标类别比例(跌倒:非跌倒),仅在balance_strategy不为none时有效')
     
-    # 其他原有参数
+    # 模型参数
     parser.add_argument('--batch_size', type=int, default=16, help='批大小')
     parser.add_argument('--num_epochs', type=int, default=80, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2正则化系数')
-    parser.add_argument('--l1_lambda', type=float, default=1e-5, help='L1正则化系数')
     parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=2, help='LSTM层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
@@ -629,7 +626,6 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
             "num_epochs": args.num_epochs,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
-            "l1_lambda": args.l1_lambda,
             "seed": args.seed
         },
         "normalization_params": {
@@ -718,7 +714,7 @@ def main():
     train_indices, test_indices = train_test_split(
         range(len(full_dataset)),
         test_size=args.test_ratio,
-        stratify=[full_dataset[i]['label'].item() for i in range(len(full_dataset))],
+        stratify=full_dataset._raw_labels,  # 使用缓存的标签
         random_state=args.seed
     )
     
@@ -726,7 +722,7 @@ def main():
     train_indices, val_indices = train_test_split(
         train_indices,
         test_size=args.val_ratio,
-        stratify=[full_dataset[i]['label'].item() for i in train_indices],
+        stratify=[full_dataset._raw_labels[i] for i in train_indices],  # 使用缓存的标签
         random_state=args.seed
     )
     
@@ -817,7 +813,7 @@ def main():
             print(f"警告: checkpoint文件不存在 - {args.checkpoint}")
     
     # 训练模型
-    print("开始训练模型...")
+    print("\n开始训练...")
     model, history = train_model(
         model=model,
         train_loader=train_loader,
@@ -827,7 +823,6 @@ def main():
         num_epochs=args.num_epochs,
         device=device,
         scheduler=scheduler,
-        l1_lambda=args.l1_lambda,
         save_dir=args.save_dir
     )
     print("训练完成!")
