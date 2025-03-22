@@ -124,11 +124,12 @@ class PoseEvaluator:
         segments = np.stack(segments, axis=0)
         return torch.FloatTensor(segments)
         
-    def evaluate(self, pose_file):
+    def evaluate(self, pose_file, reverse=False):
         """评估单个姿态文件
         
         Args:
             pose_file: 3D姿态.npz文件路径
+            reverse: 是否反转输入数据的时间顺序
             
         Returns:
             预测结果、跌倒概率和每段的预测结果
@@ -138,7 +139,18 @@ class PoseEvaluator:
             raise FileNotFoundError(f"找不到姿态文件: {pose_file}")
             
         pose_data = np.load(pose_file, allow_pickle=True)['reconstruction']
+        
+        # 如果需要，反转时间顺序
+        if reverse:
+            pose_data = pose_data[::-1]
+            print("已反转输入数据的时间顺序")
+            
         total_frames = len(pose_data)
+        
+        print(f"\n姿态数据统计:")
+        print(f"总帧数: {total_frames}")
+        print(f"每帧关键点数: {pose_data.shape[1]}")
+        print(f"每个关键点维度: {pose_data.shape[2]}")
         
         # 预处理数据
         pose_tensor = self.preprocess_pose(pose_data)
@@ -146,6 +158,7 @@ class PoseEvaluator:
         
         # 进行推理
         segment_probs = []
+        segment_features = []
         with torch.no_grad():
             # 如果数据量太大,分批处理
             batch_size = 32
@@ -153,18 +166,25 @@ class PoseEvaluator:
                 batch = pose_tensor[i:i + batch_size]
                 outputs = self.model(batch)
                 segment_probs.extend(outputs.cpu().numpy().flatten())
+                
+                # 收集每个片段的特征统计信息
+                for j in range(len(batch)):
+                    if i + j < len(pose_tensor):
+                        segment_features.append({
+                            'mean': batch[j].mean().item(),
+                            'std': batch[j].std().item(),
+                            'min': batch[j].min().item(),
+                            'max': batch[j].max().item()
+                        })
         
         # 获取每段的预测结果
-        # 模型输出高概率表示"正常"，所以跌倒概率 = 1 - 输出概率
-        fall_probs = [1 - p for p in segment_probs]
+        fall_probs = segment_probs
         segment_preds = [1 if p >= 0.5 else 0 for p in fall_probs]
         
         # 计算整体预测结果
-        # 策略: 如果任何一段预测为跌倒,则认为整个序列发生跌倒
         final_pred = 1 if any(segment_preds) else 0
         
         # 计算整体跌倒概率
-        # 策略: 使用最高的跌倒概率
         final_prob = max(fall_probs)
         
         # 生成带帧范围的结果
@@ -176,7 +196,8 @@ class PoseEvaluator:
                 'start_frame': start_frame,
                 'end_frame': end_frame,
                 'prediction': pred,
-                'fall_probability': prob  # 直接使用跌倒概率
+                'fall_probability': prob,  
+                'features': segment_features[i] if i < len(segment_features) else {}
             })
         
         return final_pred, final_prob, segment_results
@@ -190,6 +211,8 @@ def main():
                       help='要评估的3D姿态.npz文件路径')
     parser.add_argument('--gpu', type=str, default='0',
                       help='GPU ID')
+    parser.add_argument('--reverse', action='store_true',
+                      help='反转输入数据的时间顺序')
     args = parser.parse_args()
     
     # 设置设备
@@ -202,7 +225,7 @@ def main():
         evaluator = PoseEvaluator(args.model_dir, device)
         
         # 进行评估
-        pred, prob, segment_results = evaluator.evaluate(args.pose_file)
+        pred, prob, segment_results = evaluator.evaluate(args.pose_file, args.reverse)
         
         # 输出结果
         result = "跌倒" if pred == 1 else "正常"
@@ -217,6 +240,11 @@ def main():
             seg_result = "跌倒" if result['prediction'] == 1 else "正常"
             print(f"段 {i+1} (帧 {result['start_frame']}-{result['end_frame']}): "
                   f"{seg_result} (跌倒概率: {result['fall_probability']:.4f})")
+            if result['features']:
+                print(f"  均值: {result['features']['mean']:.4f}")
+                print(f"  标准差: {result['features']['std']:.4f}")
+                print(f"  最小值: {result['features']['min']:.4f}")
+                print(f"  最大值: {result['features']['max']:.4f}")
         
     except Exception as e:
         print(f"错误: {str(e)}")
