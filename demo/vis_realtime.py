@@ -20,15 +20,93 @@ import matplotlib
 import matplotlib.pyplot as plt 
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.gridspec as gridspec
+
 plt.switch_backend('agg')
 warnings.filterwarnings('ignore')
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 
+# 添加项目根目录到Python路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 sys.path.append(os.getcwd())
 from common.utils import *
 from common.camera import *
 from model.mixste.hot_mixste import Model
+
+# 导入跌倒检测模型
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'train'))
+from train_lstm import FallDetectionLSTM
+
+class FallDetector:
+    """跌倒检测器类"""
+    def __init__(self, model_dir, device, seq_length=30):
+        self.seq_length = seq_length
+        self.device = device
+        
+        # 加载模型配置
+        summary_file = os.path.join(model_dir, 'training_summary.json')
+        with open(summary_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        # 提取模型参数
+        self.model_params = config['parameters']['model_params']
+        self.norm_params = config['parameters']['normalization_params']
+        self.mean = np.array(self.norm_params['mean'])
+        self.std = np.array(self.norm_params['std'])
+        
+        # 创建模型实例
+        self.model = FallDetectionLSTM(
+            input_dim=51,  # 17个关键点 * 3个坐标
+            hidden_dim=self.model_params['hidden_dim'],
+            num_layers=self.model_params['num_layers'],
+            dropout=self.model_params['dropout']
+        ).to(device)
+        
+        # 加载模型权重
+        model_path = os.path.join(model_dir, 'best_model.pth')
+        checkpoint = torch.load(model_path, map_location=device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.eval()
+        
+        # 初始化序列缓冲区
+        self.pose_buffer = deque(maxlen=seq_length)
+        self.last_prediction_time = None
+        self.last_prediction = None
+        
+    def add_pose(self, pose_3d):
+        """添加新的3D姿态到缓冲区"""
+        if pose_3d is not None:
+            self.pose_buffer.append(pose_3d)
+    
+    def get_prediction(self):
+        """获取当前序列的预测结果"""
+        if len(self.pose_buffer) < self.seq_length:
+            return None, None
+            
+        # 准备序列数据
+        sequence = np.array(list(self.pose_buffer))
+        flattened_sequence = sequence.reshape(self.seq_length, -1)
+        
+        # 标准化数据
+        normalized_sequence = (flattened_sequence - self.mean) / self.std
+        
+        # 预测
+        with torch.no_grad():
+            sequence_tensor = torch.FloatTensor(normalized_sequence).unsqueeze(0).to(self.device)
+            prediction = self.model(sequence_tensor)
+            prediction = prediction.cpu().numpy()[0][0]
+            
+        current_time = time.time()
+        self.last_prediction_time = current_time
+        self.last_prediction = prediction
+        
+        # 返回预测结果和延迟时间
+        delay = (current_time - self.last_prediction_time) if self.last_prediction_time else 0
+        return prediction, delay
 
 class Buffer:
     """缓冲区类，用于在不同处理阶段之间传递数据"""
@@ -288,11 +366,13 @@ def process_args():
     """
     处理命令行参数
     """
-    parser = argparse.ArgumentParser(description='实时3D姿态估计')
+    parser = argparse.ArgumentParser(description='实时3D姿态估计和跌倒检测')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--camera', type=int, default=0, help='摄像头ID')
     parser.add_argument('--detector', type=str, default='yolo11', choices=['yolov3', 'yolo11'], help='选择人体检测器')
     parser.add_argument('--output_file', type=str, default='realtime_3d_pose.npy', help='3D姿态输出文件名')
+    parser.add_argument('--model_dir', type=str, default='checkpoint/fall_detection_lstm/2025-03-22-2328-b', help='跌倒检测模型目录,包含best_model.pth和training_summary.json')
+    parser.add_argument('--seq_length', type=int, default=30, help='用于跌倒检测的序列长度')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
     args, unknown = parser.parse_known_args()
@@ -301,22 +381,31 @@ def process_args():
 def main():
     args = process_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 加载模型
     detector, pose_model, mixste_model = load_models(args)
+    
+    # 初始化跌倒检测器
+    fall_detector = FallDetector(args.model_dir, device, args.seq_length)
     
     # 创建缓冲区
     yolo_buffer = Buffer(maxsize=15)  # 约0.5s @ 30fps
     hrnet_buffer = Buffer(maxsize=30)  # 约1s @ 30fps
     mixste_buffer = deque(maxlen=243)  # MixSTE的输入
     
-    # 存储3D关键点
+    # 存储3D关键点和跌倒检测结果
     poses_3d = []
+    fall_status = {
+        "is_falling": False,
+        "detection_delay": 0,
+        "last_update_time": time.time()
+    }
     
     # 打开摄像头
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
-        print("Failed to open camera")
+        print("❌ 无法打开摄像头")
         return
     
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -373,17 +462,17 @@ def main():
                         human_tracking["current_id"] = current_id
                         human_tracking["frames_without_human"] = 0
                         human_tracking["reset_required"] = True
-                        update_status("Human detected")
+                        update_status("检测到新的人体目标")
                     elif human_tracking["current_id"] != current_id:
                         # ID变化，需要重置
                         human_tracking["current_id"] = current_id
                         human_tracking["frames_without_human"] = 0
                         human_tracking["reset_required"] = True
-                        update_status("Human ID changed")
+                        update_status("人体ID变化")
                     else:
                         # 同一个人，继续跟踪
                         human_tracking["frames_without_human"] = 0
-                        update_status("Tracking human")
+                        update_status("跟踪目标中")
                 
                 # 提取姿态
                 keypoints, scores = extract_pose2D(frame, [max_bbox], pose_model)
@@ -398,7 +487,7 @@ def main():
                     if human_tracking["current_id"] is not None:
                         human_tracking["current_id"] = None
                         human_tracking["reset_required"] = True
-                        update_status("No human detected")
+                        update_status("未检测到人体目标")
                 
                 # 放回一个空结果
                 hrnet_buffer.put((frame, None, None, human_tracking["reset_required"]))
@@ -416,7 +505,7 @@ def main():
             
             # 如果需要重置，清空MixSTE缓冲区
             if reset_required and len(mixste_buffer) > 0:
-                update_status("Resetting data stream")
+                update_status("重置姿态数据流")
                 mixste_buffer.clear()
             
             if keypoints is not None:
@@ -431,8 +520,6 @@ def main():
                         buffer_list = list(mixste_buffer)
                         while len(buffer_list) < 243:
                             buffer_list.append(buffer_list[-1])
-                        
-                        # 使用填充后的数据
                         input_keypoints = buffer_list
                     else:
                         # 已有243帧，直接使用
@@ -441,11 +528,27 @@ def main():
                     # 预测3D姿态
                     pose3d = predict_pose3D(input_keypoints, mixste_model, args, img_size)
                     
-                    # 保存结果
+                    # 保存结果并进行跌倒检测
                     if pose3d is not None:
-                        poses_3d.append(pose3d)  # 保存结果
+                        poses_3d.append(pose3d)
+                        
+                        # 添加到跌倒检测器并获取预测结果
+                        fall_detector.add_pose(pose3d)
+                        fall_prob, delay = fall_detector.get_prediction()
+                        
+                        # 更新跌倒状态
+                        if fall_prob is not None:
+                            fall_status["is_falling"] = fall_prob > 0.5
+                            fall_status["detection_delay"] = delay
+                            fall_status["last_update_time"] = time.time()
+                            
+                            # 更新状态消息
+                            if fall_status["is_falling"]:
+                                update_status("检测到跌倒!")
+                            else:
+                                update_status("正常活动")
+                        
                         fps_count += 1
-                        update_status("3D pose estimated successfully")
             
             # 计算FPS
             if time.time() - fps_time > 1.0:  # 每秒更新一次
@@ -461,13 +564,13 @@ def main():
     pose3d_thread.daemon = True
     pose3d_thread.start()
     
-    print("System started, press 'q' to exit")
+    print("✓ 系统已启动，按 'q' 退出")
     
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("Failed to get camera frame")
+                print("❌ 无法获取摄像头帧")
                 break
             
             # 将帧放入YOLO缓冲区
@@ -479,19 +582,27 @@ def main():
             if current_time - fps_time > 1.0:
                 fps_time = current_time
             
-            # 显示FPS和状态信息
+            # 显示系统状态信息
             cv2.putText(frame, f"FPS: {fps_display}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(frame, f"Poses: {len(poses_3d)}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
-            # 确保状态消息使用UTF-8编码
-            status_text = human_tracking.get('status_message', 'Initializing...')
+            # 显示跌倒检测结果
+            if fall_status["last_update_time"] is not None:
+                delay = time.time() - fall_status["last_update_time"]
+                status_color = (0, 0, 255) if fall_status["is_falling"] else (0, 255, 0)
+                cv2.putText(frame, f"Fall: {fall_status['is_falling']}", (10, 110), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                cv2.putText(frame, f"Delay: {delay:.1f}s", (10, 150),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # 显示系统状态
+            status_text = human_tracking.get('status_message', '系统初始化中...')
             try:
-                # 尝试编码并解码，确保文本可以正确显示
                 status_text = status_text.encode('utf-8').decode('utf-8')
             except UnicodeError:
-                status_text = 'System initializing...'
-            
-            cv2.putText(frame, f"Status: {status_text}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                status_text = '系统初始化中...'
+            cv2.putText(frame, f"Status: {status_text}", (10, 190),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
             cv2.imshow('Realtime 3D Pose Estimation', frame)
             
@@ -500,7 +611,7 @@ def main():
                 break
     
     except KeyboardInterrupt:
-        print("User interrupted")
+        print("用户中断运行")
     
     finally:
         # 保存3D姿态数据
@@ -508,9 +619,9 @@ def main():
             poses_3d_array = np.array(poses_3d)
             output_file = args.output_file
             np.save(output_file, poses_3d_array)
-            print(f"Saved 3D pose data to {output_file}")
-            print(f"Generated {len(poses_3d)} frames of 3D pose data")
-            print(f"Average processing speed: {fps_display} FPS")
+            print(f"✓ 已保存3D姿态数据到 {output_file}")
+            print(f"总共生成 {len(poses_3d)} 帧3D姿态数据")
+            print(f"平均处理速度: {fps_display} FPS")
         
         # 释放资源
         cap.release()
