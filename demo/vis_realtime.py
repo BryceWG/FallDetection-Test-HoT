@@ -399,7 +399,9 @@ def main():
     fall_status = {
         "is_falling": False,
         "detection_delay": 0,
-        "last_update_time": time.time()
+        "last_update_time": None,
+        "has_human": False,
+        "status_text": "Waiting for human"
     }
     
     # 打开摄像头
@@ -488,6 +490,11 @@ def main():
                         human_tracking["current_id"] = None
                         human_tracking["reset_required"] = True
                         update_status("未检测到人体目标")
+                        # 重置跌倒检测状态
+                        fall_status["has_human"] = False
+                        fall_status["is_falling"] = False
+                        fall_status["last_update_time"] = None
+                        fall_status["status_text"] = "No human detected"
                 
                 # 放回一个空结果
                 hrnet_buffer.put((frame, None, None, human_tracking["reset_required"]))
@@ -541,12 +548,13 @@ def main():
                             fall_status["is_falling"] = fall_prob > 0.5
                             fall_status["detection_delay"] = delay
                             fall_status["last_update_time"] = time.time()
+                            fall_status["has_human"] = True
                             
                             # 更新状态消息
                             if fall_status["is_falling"]:
-                                update_status("检测到跌倒!")
+                                fall_status["status_text"] = "Fall detected!"
                             else:
-                                update_status("正常活动")
+                                fall_status["status_text"] = "Normal activity"
                         
                         fps_count += 1
             
@@ -587,21 +595,22 @@ def main():
             cv2.putText(frame, f"Poses: {len(poses_3d)}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
             # 显示跌倒检测结果
-            if fall_status["last_update_time"] is not None:
-                delay = time.time() - fall_status["last_update_time"]
+            if fall_status["has_human"]:
+                # 有人体时显示跌倒状态和延迟
                 status_color = (0, 0, 255) if fall_status["is_falling"] else (0, 255, 0)
                 cv2.putText(frame, f"Fall: {fall_status['is_falling']}", (10, 110), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
-                cv2.putText(frame, f"Delay: {delay:.1f}s", (10, 150),
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                if fall_status["last_update_time"] is not None:
+                    delay = time.time() - fall_status["last_update_time"]
+                    cv2.putText(frame, f"Delay: {delay:.1f}s", (10, 150),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            else:
+                # 无人体时显示等待状态
+                cv2.putText(frame, "Waiting for human...", (10, 110),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
             
             # 显示系统状态
-            status_text = human_tracking.get('status_message', '系统初始化中...')
-            try:
-                status_text = status_text.encode('utf-8').decode('utf-8')
-            except UnicodeError:
-                status_text = '系统初始化中...'
-            cv2.putText(frame, f"Status: {status_text}", (10, 190),
+            cv2.putText(frame, f"Status: {fall_status['status_text']}", (10, 190),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
             cv2.imshow('Realtime 3D Pose Estimation', frame)
