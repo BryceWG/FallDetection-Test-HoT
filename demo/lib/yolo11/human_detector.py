@@ -283,8 +283,6 @@ def yolo_human_det(img, model=None, reso=416, confidence=0.70, quiet=True):
                 if frame_count <= MAX_INIT_FRAMES and not target_locked:
                     target_locked = True
                     target_bbox = bbox
-                    print(f"已锁定目标! 帧: {frame_count}, 面积: {areas[0][1]:.2f}")
-                
                 return np.array([bbox]), np.array([[score]])
         
         # 如果当前帧未检测到人体
@@ -295,8 +293,67 @@ def yolo_human_det(img, model=None, reso=416, confidence=0.70, quiet=True):
         # 更新帧计数
         frame_count += 1
         
-        # 如果前三帧都未检测到人体，报错
+        # 如果前三帧都未检测到人体，返回状态
         if frame_count >= MAX_INIT_FRAMES and not target_locked:
-            print("警告: 前三帧未检测到任何人体!")
+            return None, "No human detected"
             
         return None, None 
+
+def yolo_human_det_v2(img, model, detector_type):
+    """
+    使用YOLO检测人体
+    """
+    if detector_type == 'yolo11':
+        # 使用全局变量跟踪状态
+        global frame_count
+        global target_locked
+        global target_bbox
+        global MAX_INIT_FRAMES
+        
+        # 初始化目标跟踪变量
+        if 'frame_count' not in globals():
+            frame_count = 0
+            target_locked = False
+            target_bbox = None
+            MAX_INIT_FRAMES = 3
+        
+        # 检测人体
+        results = model(img)
+        
+        # 获取检测结果
+        if len(results.pred[0]) > 0:
+            # 找到最大的人体边界框
+            max_area = 0
+            max_box = None
+            max_conf = 0
+            
+            for *box, conf, cls in results.pred[0]:
+                if cls == 0:  # 人体类别
+                    x1, y1, x2, y2 = box
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > max_area:
+                        max_area = area
+                        max_box = box
+                        max_conf = conf
+            
+            if max_box is not None:
+                # 重置帧计数并锁定目标
+                frame_count = 0
+                target_locked = True
+                target_bbox = max_box.cpu().numpy()
+                return np.array([target_bbox]), np.array([[max_conf.cpu().numpy()]])
+        
+        if target_locked:
+            # 如果目标已锁定，使用上一帧的目标框
+            return np.array([target_bbox]), np.array([[1.0]])
+        
+        # 更新帧计数
+        frame_count += 1
+        
+        # 返回None，状态信息会在主程序中处理
+        if frame_count >= MAX_INIT_FRAMES and not target_locked:
+            return None, "No human detected"
+        return None, None
+    else:
+        from lib.yolov3.human_detector import yolo_human_det as yolo_det
+        return yolo_det(img, model)
