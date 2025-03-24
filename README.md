@@ -7,6 +7,7 @@ uv pip install -r requirements.txt
 - 可视化2D和3D姿态结果
 - 生成演示视频
 - 分类器分析视频
+- 实时跌倒检测
 
 ### 2. 核心组件
 

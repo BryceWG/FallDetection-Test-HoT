@@ -22,3 +22,8 @@
 
 # windsurf rules
 .windsurfrules
+
+!checkpoint/fall_detection_lstm/2025-03-22-2328-b/
+!real-time_demo.mp4
+!environment.yml
+!frame_data.csv
