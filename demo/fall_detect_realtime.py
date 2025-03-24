@@ -13,6 +13,7 @@ import json
 from collections import deque
 from queue import Queue
 import threading
+from scipy.interpolate import interp1d
 from vis import get_pose2D, get_pose3D  # 只保留姿态提取相关函数
 
 # 添加项目根目录到路径
@@ -322,7 +323,7 @@ class RealtimeFallDetection:
         except Exception as e:
             print(f"Warmup warning: {str(e)}")
 
-    def process_video_segment(self, frames):
+    def process_video_segment(self, frames, need_interpolation=False):
         """处理视频片段"""
         try:
             # 保存为临时视频文件
@@ -343,6 +344,10 @@ class RealtimeFallDetection:
                                      batch_size=self.args.batch_size)
                 
                 if keypoints is not None and len(keypoints) > 0:
+                    # 如果需要，进行线性插值
+                    if need_interpolation:
+                        keypoints = self.interpolate_keypoints(keypoints, self.args.buffer_size)
+                    
                     # 生成3D姿态
                     output_3d_data = get_pose3D(temp_video_path, self.output_dir, self.args.fix_z)
                     output_3d_file = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
@@ -371,6 +376,9 @@ class RealtimeFallDetection:
         frames_buffer = []
         
         while not self.stop_flag.is_set():
+            # 检查队列中的帧数
+            pending_frames = self.frame_queue.qsize()
+            
             # 收集帧直到达到缓冲区大小
             while len(frames_buffer) < self.args.buffer_size:
                 try:
@@ -381,7 +389,15 @@ class RealtimeFallDetection:
                     
             # 如果收集到足够的帧，进行处理
             if len(frames_buffer) >= self.args.buffer_size:
-                pred, prob = self.process_video_segment(frames_buffer)
+                # 检查是否需要自适应采样
+                if pending_frames > self.args.max_pending_frames:
+                    print(f"帧数堆积超过阈值({pending_frames}帧)，启用自适应采样，采样率: {self.args.sampling_rate}")
+                    # 均匀采样帧
+                    sampled_frames = self.adaptive_sampling(frames_buffer, self.args.sampling_rate)
+                    pred, prob = self.process_video_segment(sampled_frames, need_interpolation=True)
+                else:
+                    pred, prob = self.process_video_segment(frames_buffer)
+                
                 if pred is not None:
                     self.result_queue.put((pred, prob, time.time()))
                 frames_buffer = frames_buffer[int(self.args.buffer_size * (1 - self.args.overlap_ratio)):]  # 保留后半部分帧用于下次处理
@@ -389,6 +405,52 @@ class RealtimeFallDetection:
             # 如果停止标志已设置且没有更多帧，退出循环
             if self.stop_flag.is_set() and self.frame_queue.empty():
                 break
+
+    def adaptive_sampling(self, frames, sampling_rate):
+        """对帧进行自适应采样
+        
+        Args:
+            frames: 输入帧列表
+            sampling_rate: 采样率 (0-1)
+            
+        Returns:
+            采样后的帧列表
+        """
+        total_frames = len(frames)
+        sample_count = max(2, int(total_frames * sampling_rate))  # 至少保留2帧用于插值
+        
+        # 均匀采样
+        indices = np.linspace(0, total_frames - 1, sample_count, dtype=int)
+        return [frames[i] for i in indices]
+    
+    def interpolate_keypoints(self, keypoints, target_length):
+        """对关键点进行线性插值
+        
+        Args:
+            keypoints: 关键点数组 [n, 17, 2]
+            target_length: 目标长度
+            
+        Returns:
+            插值后的关键点数组 [target_length, 17, 2]
+        """
+        if len(keypoints) < 2:
+            return keypoints
+            
+        # 创建插值函数
+        frame_indices = np.arange(len(keypoints))
+        target_indices = np.linspace(0, len(keypoints) - 1, target_length)
+        
+        # 对每个关键点进行插值
+        interpolated = np.zeros((target_length, keypoints.shape[1], keypoints.shape[2]), dtype=np.float32)
+        
+        for j in range(keypoints.shape[1]):  # 对每个关节
+            for k in range(keypoints.shape[2]):  # 对x和y坐标
+                # 创建插值函数
+                interp_func = interp1d(frame_indices, keypoints[:, j, k], kind='linear', bounds_error=False, fill_value='extrapolate')
+                # 应用插值
+                interpolated[:, j, k] = interp_func(target_indices)
+                
+        return interpolated
 
     def display_frame(self, frame):
         """在帧上显示检测结果"""
@@ -403,7 +465,7 @@ class RealtimeFallDetection:
             print(f"Error getting results: {str(e)}")
             
         # 计算显示区域的高度
-        text_lines = 3  # 状态、概率和未处理帧数
+        text_lines = 4  # 状态、概率、未处理帧数和采样状态
         rect_height = 30 * text_lines + 20
         
         # 添加半透明背景
@@ -415,14 +477,19 @@ class RealtimeFallDetection:
         status_color = (0, 0, 255) if self.current_status == "Fall" else (0, 255, 0)
         cv2.putText(frame, f"Status: {self.current_status}", (20, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-        cv2.putText(frame, f"Probability: {self.current_prob:.4f}", (20, 60),
+        cv2.putText(frame, f"Probability: {self.current_prob:.2f}", (20, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # 显示未处理帧数
+        # 显示未处理的帧数
         pending_frames = self.frame_queue.qsize()
-        queue_color = (0, 165, 255) if pending_frames > 100 else (255, 255, 255)  # 帧数过多时显示橙色
+        queue_color = (0, 255, 255) if pending_frames < self.args.max_pending_frames else (0, 0, 255)
         cv2.putText(frame, f"Pending Frames: {pending_frames}", (20, 90),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, queue_color, 2)
+        
+        # 显示采样状态
+        if pending_frames > self.args.max_pending_frames:
+            cv2.putText(frame, f"Sampling Rate: {self.args.sampling_rate:.2f}", (20, 120),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
         
         return frame
 
@@ -511,9 +578,13 @@ def parse_args():
     
     # 实时处理参数
     parser.add_argument('--buffer_size', type=int, default=120,
-                       help='Frame buffer size (default: 30)')
+                       help='Frame buffer size (default: 120)')
     parser.add_argument('--overlap_ratio', type=float, default=0.1,
-                       help='Overlap ratio between consecutive frame batches (0-1, default: 0.5)')
+                       help='Overlap ratio between consecutive frame batches (0-1, default: 0.1)')
+    parser.add_argument('--max_pending_frames', type=int, default=200,
+                       help='Maximum pending frames before adaptive sampling (default: 100)')
+    parser.add_argument('--sampling_rate', type=float, default=0.5,
+                       help='Sampling rate when max_pending_frames is exceeded (default: 0.5)')
     
     args = parser.parse_args()
     return args
