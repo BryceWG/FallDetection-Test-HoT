@@ -271,9 +271,8 @@ class RealtimeFallDetection:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # 初始化队列和线程控制
-        self.frame_queue = Queue(maxsize=300)  # 原始帧队列
-        self.result_queue = Queue(maxsize=300)  # 处理结果队列
-        self.processing_queue = Queue(maxsize=10)  # 待处理的视频片段队列
+        self.frame_queue = Queue()  # 移除maxsize限制
+        self.result_queue = Queue()
         self.stop_flag = threading.Event()
         
         # 设置输出目录
@@ -282,6 +281,18 @@ class RealtimeFallDetection:
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
         
+        print("Initializing models...")
+        
+        # 加载人体检测模型
+        if args.detector == 'yolo11':
+            from lib.yolo11.human_detector import load_model as yolo_model
+            from lib.yolo11.human_detector import yolo_human_det as yolo_det
+            from lib.yolo11.human_detector import reset_target
+            reset_target()
+        else:  # 默认使用YOLOv3
+            from lib.yolov3.human_detector import load_model as yolo_model
+            from lib.yolov3.human_detector import yolo_human_det as yolo_det
+            
         # 初始化评估器(保持模型常驻内存)
         if args.model_dir:
             self.evaluator = PoseEvaluator(args.model_dir, self.device)
@@ -296,16 +307,26 @@ class RealtimeFallDetection:
         self.status_update_time = 0
         self.status_display_duration = args.status_duration
         
-        # 加载人体检测模型
-        if args.detector == 'yolo11':
-            from lib.yolo11.human_detector import load_model as yolo_model
-            from lib.yolo11.human_detector import yolo_human_det as yolo_det
-            from lib.yolo11.human_detector import reset_target
-            reset_target()
-        else:  # 默认使用YOLOv3
-            from lib.yolov3.human_detector import load_model as yolo_model
-            from lib.yolov3.human_detector import yolo_human_det as yolo_det
+        # 预热模型
+        print("Warming up models...")
+        self._warmup_models()
+        print("Models ready!")
+
+    def _warmup_models(self):
+        """预热模型，进行一次完整的处理流程"""
+        try:
+            # 创建一个测试视频片段
+            test_frames = []
+            test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            for _ in range(self.args.buffer_size):
+                test_frames.append(test_frame.copy())
+                
+            # 运行一次完整的处理流程
+            self.process_video_segment(test_frames)
             
+        except Exception as e:
+            print(f"Warmup warning: {str(e)}")
+
     def process_video_segment(self, frames):
         """处理视频片段"""
         try:
@@ -323,7 +344,7 @@ class RealtimeFallDetection:
             if os.path.exists(temp_video_path):
                 # 生成2D姿态
                 keypoints = get_pose2D(temp_video_path, self.output_dir,
-                                     detector=self.args.detector,
+                                     detector=self.args.detector, 
                                      batch_size=self.args.batch_size)
                 
                 if keypoints is not None and len(keypoints) > 0:
@@ -383,20 +404,30 @@ class RealtimeFallDetection:
                 self.current_status = "Fall" if pred == 1 else "Normal"
                 self.current_prob = prob
                 self.status_update_time = timestamp
-        except:
-            pass
+        except Exception as e:
+            print(f"Error getting results: {str(e)}")
             
-        # 显示结果
-        if time.time() - self.status_update_time < self.status_display_duration:
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (10, 10), (300, 70), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-            
-            status_color = (0, 0, 255) if self.current_status == "Fall" else (0, 255, 0)
-            cv2.putText(frame, f"Status: {self.current_status}", (20, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-            cv2.putText(frame, f"Probability: {self.current_prob:.4f}", (20, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # 计算显示区域的高度
+        text_lines = 3  # 状态、概率和未处理帧数
+        rect_height = 30 * text_lines + 20
+        
+        # 添加半透明背景
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (10, 10), (300, 10 + rect_height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+        
+        # 添加文本
+        status_color = (0, 0, 255) if self.current_status == "Fall" else (0, 255, 0)
+        cv2.putText(frame, f"Status: {self.current_status}", (20, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+        cv2.putText(frame, f"Probability: {self.current_prob:.4f}", (20, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # 显示未处理帧数
+        pending_frames = self.frame_queue.qsize()
+        queue_color = (0, 165, 255) if pending_frames > 100 else (255, 255, 255)  # 帧数过多时显示橙色
+        cv2.putText(frame, f"Pending Frames: {pending_frames}", (20, 90),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, queue_color, 2)
         
         return frame
 
@@ -437,10 +468,7 @@ class RealtimeFallDetection:
                     break
                 
                 # 将帧添加到处理队列
-                try:
-                    self.frame_queue.put(frame.copy(), timeout=0.1)
-                except:
-                    pass  # 如果队列满了，跳过这一帧
+                self.frame_queue.put(frame.copy())  # 移除timeout限制
                 
                 # 显示带结果的帧
                 processed_frame = self.display_frame(frame)
