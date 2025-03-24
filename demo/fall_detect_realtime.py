@@ -384,7 +384,7 @@ class RealtimeFallDetection:
                 pred, prob = self.process_video_segment(frames_buffer)
                 if pred is not None:
                     self.result_queue.put((pred, prob, time.time()))
-                frames_buffer = frames_buffer[self.args.buffer_size//2:]  # 保留后半部分帧用于下次处理
+                frames_buffer = frames_buffer[int(self.args.buffer_size * (1 - self.args.overlap_ratio)):]  # 保留后半部分帧用于下次处理
                 
             # 如果停止标志已设置且没有更多帧，退出循环
             if self.stop_flag.is_set() and self.frame_queue.empty():
@@ -510,8 +510,10 @@ def parse_args():
                       help='Frame batch size (default: 2000)')
     
     # 实时处理参数
-    parser.add_argument('--buffer_size', type=int, default=30,
+    parser.add_argument('--buffer_size', type=int, default=120,
                        help='Frame buffer size (default: 30)')
+    parser.add_argument('--overlap_ratio', type=float, default=0.1,
+                       help='Overlap ratio between consecutive frame batches (0-1, default: 0.5)')
     
     args = parser.parse_args()
     return args
