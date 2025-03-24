@@ -305,7 +305,6 @@ class RealtimeFallDetection:
         self.current_status = "Normal"
         self.current_prob = 0.0
         self.status_update_time = 0
-        self.status_display_duration = args.status_duration
         
         # 预热模型
         print("Warming up models...")
@@ -518,12 +517,6 @@ def parse_args():
     # 实时处理参数
     parser.add_argument('--buffer_size', type=int, default=30,
                       help='Frame buffer size (default: 30)')
-    parser.add_argument('--status_duration', type=float, default=3.0,
-                      help='Status display duration in seconds (default: 3.0)')
-    
-    # 跌倒检测参数
-    parser.add_argument('--reverse', action='store_true',
-                      help='Reverse input data time order')
     
     args = parser.parse_args()
     return args
