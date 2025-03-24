@@ -284,14 +284,10 @@ class RealtimeFallDetection:
         print("Initializing models...")
         
         # 加载人体检测模型
-        if args.detector == 'yolo11':
-            from lib.yolo11.human_detector import load_model as yolo_model
-            from lib.yolo11.human_detector import yolo_human_det as yolo_det
-            from lib.yolo11.human_detector import reset_target
-            reset_target()
-        else:  # 默认使用YOLOv3
-            from lib.yolov3.human_detector import load_model as yolo_model
-            from lib.yolov3.human_detector import yolo_human_det as yolo_det
+        from lib.yolo11.human_detector import load_model as yolo_model
+        from lib.yolo11.human_detector import yolo_human_det as yolo_det
+        from lib.yolo11.human_detector import reset_target
+        reset_target()
             
         # 初始化评估器(保持模型常驻内存)
         if args.model_dir:
@@ -508,9 +504,8 @@ def parse_args():
     # 姿态估计参数
     parser.add_argument('--fix_z', action='store_true',
                       help='Fix Z axis')
-    parser.add_argument('--detector', type=str, default='yolo11', 
-                      choices=['yolov3', 'yolo11'],
-                      help='Choose human detector')
+    parser.add_argument('--detector', type=str, default='yolo11',
+                      help='Human detector type')
     parser.add_argument('--batch_size', type=int, default=2000,
                       help='Frame batch size (default: 2000)')
     

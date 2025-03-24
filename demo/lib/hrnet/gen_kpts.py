@@ -24,9 +24,6 @@ from lib.hrnet.lib.models import pose_hrnet
 cfg_dir = 'demo/lib/hrnet/experiments/'
 model_dir = 'demo/lib/checkpoint/'
 
-# Loading human detector model
-from lib.yolov3.human_detector import load_model as yolo_model
-from lib.yolov3.human_detector import yolo_human_det as yolo_det
 from lib.sort.sort import Sort
 
 
@@ -86,7 +83,7 @@ def model_load(config):
     return model
 
 
-def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector='yolov3', batch_size=200, hrnet_cfg=None):
+def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector='yolo11', batch_size=200, hrnet_cfg=None):
     """
     生成视频的关键点
     采用批量处理模式：先用YOLO处理所有帧，再用HRNet处理
@@ -118,25 +115,18 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
     num_batches = (video_length + batch_size - 1) // batch_size
 
     # 加载模型
-    if detector == 'yolo11':
-        from lib.yolo11.human_detector import load_model as yolo_model
-        from lib.yolo11.human_detector import yolo_human_det as yolo_det
-        from lib.yolo11.human_detector import reset_target  # 导入重置目标函数
-        has_quiet_param = True
-        yolo_batch_size = 16  # YOLO11的批处理大小
-    else:  # 默认使用YOLOv3
-        from lib.yolov3.human_detector import load_model as yolo_model
-        from lib.yolov3.human_detector import yolo_human_det as yolo_det
-        has_quiet_param = False
-        yolo_batch_size = 1
+    from lib.yolo11.human_detector import load_model as yolo_model
+    from lib.yolo11.human_detector import yolo_human_det as yolo_det
+    from lib.yolo11.human_detector import reset_target  # 导入重置目标函数
+    has_quiet_param = True
+    yolo_batch_size = 16  # YOLO11的批处理大小
         
     human_model = yolo_model(inp_dim=det_dim)
     pose_model = model_load(cfg)
     people_sort = Sort(min_hits=0)
     
-    # 重置目标锁定状态（如果使用YOLO11）
-    if detector == 'yolo11':
-        reset_target()
+    # 重置目标锁定状态
+    reset_target()
 
     # 用于存储所有结果
     all_keypoints = []
@@ -169,19 +159,12 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
         batch_bboxs = []
         batch_scores = []
         
-        if detector == 'yolo11':
-            # 使用YOLO11的批处理功能
-            for i in range(0, len(frames), yolo_batch_size):
-                batch = frames[i:i + yolo_batch_size]
-                bboxs_batch, scores_batch = yolo_det(batch, human_model, reso=det_dim, confidence=args.thred_score, quiet=True)
-                batch_bboxs.extend(bboxs_batch)
-                batch_scores.extend(scores_batch)
-        else:
-            # 原始的逐帧处理方式
-            for frame in tqdm(frames, desc=f'批次 {batch_idx + 1}'):
-                bboxs, scores = yolo_det(frame, human_model, reso=det_dim, confidence=args.thred_score)
-                batch_bboxs.append(bboxs)
-                batch_scores.append(scores)
+        # 使用YOLO11的批处理功能
+        for i in range(0, len(frames), yolo_batch_size):
+            batch = frames[i:i + yolo_batch_size]
+            bboxs_batch, scores_batch = yolo_det(batch, human_model, reso=det_dim, confidence=args.thred_score, quiet=True)
+            batch_bboxs.extend(bboxs_batch)
+            batch_scores.extend(scores_batch)
         
         # 重置视频读取位置到当前批次开始
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -214,57 +197,10 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
                 continue
                 
             # 处理检测框...（保持原有的检测框处理逻辑不变）
-            if detector == 'yolo11':
-                track_bboxs = []
-                for bbox in bboxs:
-                    bbox = [round(i, 2) for i in list(bbox)]
-                    track_bboxs.append(bbox)
-            else:
-                # 使用Sort跟踪器更新
-                people_track = people_sort.update(bboxs)
-                
-                # 处理目标跟踪...（保持原有的目标跟踪逻辑不变）
-                if batch_idx == 0 and frame_idx == 0 and people_track.shape[0] > 0:
-                    areas = []
-                    for i in range(people_track.shape[0]):
-                        bbox = people_track[i, :-1]
-                        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                        areas.append((i, area, people_track[i, -1]))
-                    areas.sort(key=lambda x: x[1], reverse=True)
-                    target_id = areas[0][2]
-                
-                if target_id is not None:
-                    target_idx = -1
-                    for i in range(people_track.shape[0]):
-                        if people_track[i, -1] == target_id:
-                            target_idx = i
-                            break
-                    
-                    if target_idx >= 0:
-                        people_track_ = people_track[target_idx, :-1].reshape(1, 4)
-                    else:
-                        if batch_kpts:
-                            batch_kpts.append(batch_kpts[-1])
-                            batch_kpts_scores.append(batch_kpts_scores[-1])
-                            continue
-                        else:
-                            if people_track.shape[0] > 0:
-                                people_track_ = people_track[0, :-1].reshape(1, 4)
-                            else:
-                                continue
-                else:
-                    if people_track.shape[0] == 1:
-                        people_track_ = people_track[-1, :-1].reshape(1, 4)
-                    elif people_track.shape[0] >= 2:
-                        people_track_ = people_track[-num_peroson:, :-1].reshape(num_peroson, 4)
-                        people_track_ = people_track_[::-1]
-                    else:
-                        continue
-
-                track_bboxs = []
-                for bbox in people_track_:
-                    bbox = [round(i, 2) for i in list(bbox)]
-                    track_bboxs.append(bbox)
+            track_bboxs = []
+            for bbox in bboxs:
+                bbox = [round(i, 2) for i in list(bbox)]
+                track_bboxs.append(bbox)
 
             # 准备HRNet输入
             inputs, origin_img, center, scale = PreProcess(frame, track_bboxs, cfg, num_peroson)

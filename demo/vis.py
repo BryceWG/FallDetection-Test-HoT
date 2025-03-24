@@ -133,14 +133,10 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolo11', batch
 
     print('⏳ 生成2D姿态...')
     with torch.no_grad():
-        if detector == 'yolo11':
-            from lib.yolo11.human_detector import load_model as yolo_model
-            from lib.yolo11.human_detector import yolo_human_det as yolo_det
-            from lib.yolo11.human_detector import reset_target
-            reset_target()
-        else:  # 默认使用YOLOv3
-            from lib.yolov3.human_detector import load_model as yolo_model
-            from lib.yolov3.human_detector import yolo_human_det as yolo_det
+        from lib.yolo11.human_detector import load_model as yolo_model
+        from lib.yolo11.human_detector import yolo_human_det as yolo_det
+        from lib.yolo11.human_detector import reset_target
+        reset_target()
             
         # 使用更高的检测分辨率(832x832)和新的HRNet配置
         keypoints, scores = hrnet_pose(video_path, det_dim=832, num_peroson=1, gen_output=True, 
@@ -511,7 +507,7 @@ def process_args():
     parser.add_argument('--gen_video', action='store_true', help='生成视频')
     parser.add_argument('--all', action='store_true', help='执行所有步骤')
     parser.add_argument('--2d_json', action='store_true', help='将2D姿态数据以JSON格式输出')
-    parser.add_argument('--detector', type=str, default='yolo11', choices=['yolov3', 'yolo11'], help='选择人体检测器')
+    parser.add_argument('--detector', type=str, default='yolo11', help='人体检测器类型')
     parser.add_argument('--batch_size', type=int, default=2000, help='帧分组大小，默认为2000帧')
     
     # 解析已知参数,忽略未知参数(这些参数可能是HRNet的)
