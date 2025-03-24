@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 import torch.nn as nn
 import json
-
+from vis import get_pose2D, get_pose3D, visualize_pose2D, visualize_pose3D, generate_demo
 # 添加项目根目录到路径
 sys.path.append(os.getcwd())
 
@@ -29,29 +29,27 @@ class FallDetectionLSTM(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         
-        # LSTM层
+        # 单向LSTM层
         self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
-            bidirectional=True
+            bidirectional=False  # 改为单向LSTM
         )
         
-        # 注意力机制
+        # 注意力机制 - 调整维度以适应单向LSTM
         self.attention = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
+            nn.Linear(hidden_dim, 64),  # 输入维度减半
             nn.Tanh(),
-            nn.Linear(128, 1)
+            nn.Linear(64, 1)
         )
         
-        # 分类层
+        # 分类层 - 简化结构并添加BatchNorm
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 64),
+            nn.Linear(hidden_dim, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, 1),
@@ -60,21 +58,19 @@ class FallDetectionLSTM(nn.Module):
     
     def forward(self, x):
         # LSTM前向传播
-        lstm_out, _ = self.lstm(x)  # [batch_size, seq_len, hidden_dim*2]
+        lstm_out, _ = self.lstm(x)  # [batch_size, seq_len, hidden_dim]
         
         # 注意力机制
-        attn_weights = self.attention(lstm_out)  # [batch_size, seq_len, 1]
-        attn_weights = torch.softmax(attn_weights, dim=1)
+        attention_weights = self.attention(lstm_out)  # [batch_size, seq_len, 1]
+        attention_weights = torch.softmax(attention_weights, dim=1)
         
-        # 加权求和
-        context = torch.sum(attn_weights * lstm_out, dim=1)  # [batch_size, hidden_dim*2]
+        # 加权求和得到上下文向量
+        context = torch.sum(attention_weights * lstm_out, dim=1)  # [batch_size, hidden_dim]
         
         # 分类
-        output = self.classifier(context)
+        output = self.classifier(context)  # [batch_size, 1]
+        
         return output
-
-# 导入项目中的其他模块
-from demo.vis import get_pose2D, get_pose3D, visualize_pose2D, visualize_pose3D, generate_demo
 
 # 定义PoseEvaluator类，避免从evaluate_pose导入
 class PoseEvaluator:
@@ -82,16 +78,20 @@ class PoseEvaluator:
     
     用于对单个3D姿态文件进行跌倒检测推理
     """
-    def __init__(self, model_dir, device='cuda'):
+    def __init__(self, model_dir, device='cuda', seq_length=30, stride=10):
         """
         初始化评估器
         
         Args:
             model_dir: 模型保存目录,包含训练配置json和模型权重文件
             device: 运行设备
+            seq_length: 序列长度
+            stride: 滑动窗口步长
         """
         self.model_dir = model_dir
         self.device = device
+        self.seq_length = seq_length
+        self.stride = stride
         
         # 加载训练配置和标准化参数
         self.load_config()
@@ -109,35 +109,27 @@ class PoseEvaluator:
             config = json.load(f)
             
         self.config = config
-        params = config['parameters']
-        
-        # 加载序列长度
-        self.seq_length = params['data_params']['normal_seq_length']
-        print(f"已加载配置文件: {config_file}")
-        print(f"序列长度: {self.seq_length}")
+        self.model_params = config['parameters']['model_params']
+        self.norm_params = config['parameters']['normalization_params']
         
         # 加载标准化参数
-        if 'normalization_params' not in params:
+        if 'normalization_params' not in config['parameters']:
             raise ValueError("配置文件中缺少标准化参数,请确保使用新版训练脚本重新训练模型")
             
-        norm_params = params['normalization_params']
-        self.global_mean = np.array(norm_params['mean'])
-        self.global_std = np.array(norm_params['std'])
+        self.global_mean = np.array(self.norm_params['mean'])
+        self.global_std = np.array(self.norm_params['std'])
         print(f"已加载标准化参数")
         print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
         print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
         
     def init_model(self):
         """初始化模型"""
-        # 加载模型参数
-        model_params = self.config['parameters']['model_params']
-        
         # 创建模型
         self.model = FallDetectionLSTM(
             input_dim=17*3,  # 17个关键点 * 3维坐标
-            hidden_dim=model_params['hidden_dim'],
-            num_layers=model_params['num_layers'],
-            dropout=model_params['dropout']
+            hidden_dim=self.model_params['hidden_dim'],
+            num_layers=self.model_params['num_layers'],
+            dropout=self.model_params['dropout']
         ).to(self.device)
         
         # 加载模型权重
@@ -152,43 +144,59 @@ class PoseEvaluator:
         # 设置为评估模式
         self.model.eval()
         
-    def preprocess_pose(self, pose_data):
-        """预处理姿态数据
+    def create_sequences(self, pose_data):
+        """将姿态数据分割成序列
         
         Args:
             pose_data: 原始姿态数据 [N, 17, 3]
             
         Returns:
-            处理后的数据 [num_segments, seq_length, 51]
+            sequences: 序列数据 [num_sequences, seq_length, 51]
+            frame_indices: 每个序列对应的帧范围列表 [(start, end), ...]
         """
+        sequences = []
+        frame_indices = []
         total_frames = len(pose_data)
-        num_segments = (total_frames + self.seq_length - 1) // self.seq_length
-        segments = []
         
-        for i in range(num_segments):
-            start_idx = i * self.seq_length
-            end_idx = min((i + 1) * self.seq_length, total_frames)
+        for start_idx in range(0, total_frames - self.seq_length + 1, self.stride):
+            end_idx = start_idx + self.seq_length
+            if end_idx > total_frames:
+                break
+                
+            # 获取序列数据并展平
+            sequence = pose_data[start_idx:end_idx]
+            flattened_sequence = sequence.reshape(self.seq_length, -1)
+            sequences.append(flattened_sequence)
             
-            # 获取当前段
-            segment = pose_data[start_idx:end_idx]
+            # 记录对应的帧索引
+            frame_indices.append((start_idx, end_idx))
+        
+        return np.array(sequences), frame_indices
+        
+    def normalize_sequences(self, sequences):
+        """标准化序列数据"""
+        return (sequences - self.global_mean) / self.global_std
+        
+    def predict_sequences(self, sequences, batch_size=32):
+        """对序列进行预测
+        
+        Args:
+            sequences: 标准化后的序列数据 [num_sequences, seq_length, 51]
+            batch_size: 批处理大小
             
-            # 如果是最后一段且长度不足,通过重复最后一帧进行填充
-            if len(segment) < self.seq_length:
-                padding_length = self.seq_length - len(segment)
-                padding = np.tile(segment[-1:], (padding_length, 1, 1))
-                segment = np.concatenate([segment, padding], axis=0)
-            
-            # 展平每一帧的关键点
-            segment = segment.reshape(self.seq_length, -1)
-            
-            # 应用Z-score标准化
-            segment = (segment - self.global_mean) / self.global_std
-            
-            segments.append(segment)
-            
-        # 将所有段堆叠成batch
-        segments = np.stack(segments, axis=0)
-        return torch.FloatTensor(segments)
+        Returns:
+            预测结果数组 [num_sequences]
+        """
+        predictions = []
+        
+        with torch.no_grad():
+            for i in range(0, len(sequences), batch_size):
+                batch = sequences[i:i + batch_size]
+                batch_tensor = torch.FloatTensor(batch).to(self.device)
+                outputs = self.model(batch_tensor)
+                predictions.extend(outputs.cpu().numpy())
+        
+        return np.array(predictions)
         
     def evaluate(self, pose_file, reverse=False):
         """评估单个姿态文件
@@ -213,44 +221,43 @@ class PoseEvaluator:
             
         total_frames = len(pose_data)
         
-        # 预处理数据
-        pose_tensor = self.preprocess_pose(pose_data)
-        pose_tensor = pose_tensor.to(self.device)
+        # 创建序列
+        sequences, frame_indices = self.create_sequences(pose_data)
         
-        # 进行推理
-        segment_probs = []
-        with torch.no_grad():
-            # 如果数据量太大,分批处理
-            batch_size = 32
-            for i in range(0, len(pose_tensor), batch_size):
-                batch = pose_tensor[i:i + batch_size]
-                outputs = self.model(batch)
-                segment_probs.extend(outputs.cpu().numpy().flatten())
+        # 标准化数据
+        normalized_sequences = self.normalize_sequences(sequences)
         
-        # 获取每段的预测结果
-        # 模型输出高概率表示"正常"，所以跌倒概率 = 1 - 输出概率
-        fall_probs = [1 - p for p in segment_probs]
-        segment_preds = [1 if p >= 0.5 else 0 for p in fall_probs]
+        # 进行预测
+        predictions = self.predict_sequences(normalized_sequences)
+        
+        # 计算每帧的平均预测值
+        all_frames = list(range(total_frames))
+        all_predictions = np.zeros(len(all_frames))
+        frame_counts = np.zeros(len(all_frames))
+        
+        # 累积每个序列的预测结果
+        for (start, end), pred in zip(frame_indices, predictions):
+            all_predictions[start:end] += pred.flatten()
+            frame_counts[start:end] += 1
+        
+        # 计算平均预测值
+        mask = frame_counts > 0
+        all_predictions[mask] /= frame_counts[mask]
+        
+        # 生成每段的预测结果
+        segment_results = []
+        for (start, end), pred in zip(frame_indices, predictions):
+            segment_results.append({
+                'start_frame': start,
+                'end_frame': end,
+                'prediction': 1 if pred >= 0.5 else 0,
+                'fall_probability': float(pred)
+            })
         
         # 计算整体预测结果
-        # 策略: 如果任何一段预测为跌倒,则认为整个序列发生跌倒
-        final_pred = 1 if any(segment_preds) else 0
-        
-        # 计算整体跌倒概率
-        # 策略: 使用最高的跌倒概率
-        final_prob = max(fall_probs)
-        
-        # 生成带帧范围的结果
-        segment_results = []
-        for i, (pred, prob) in enumerate(zip(segment_preds, fall_probs)):
-            start_frame = i * self.seq_length
-            end_frame = min((i + 1) * self.seq_length, total_frames)
-            segment_results.append({
-                'start_frame': start_frame,
-                'end_frame': end_frame,
-                'prediction': pred,
-                'fall_probability': prob  # 直接使用跌倒概率
-            })
+        # 策略: 如果任何一段的平均预测值超过阈值,则认为发生跌倒
+        final_pred = 1 if np.any(all_predictions >= 0.5) else 0
+        final_prob = float(np.max(all_predictions))  # 使用最高的跌倒概率
         
         return final_pred, final_prob, segment_results
 
@@ -476,7 +483,7 @@ def parse_args():
                       help='输入视频路径')
     parser.add_argument('--output_dir', type=str, default='./demo/output_detect/',
                       help='输出目录')
-    parser.add_argument('--model_dir', type=str, required=True,
+    parser.add_argument('--model_dir', type=str, default='checkpoint/fall_detection_lstm/2025-03-22-2328-b',
                       help='跌倒检测模型目录路径')
     
     # 硬件参数

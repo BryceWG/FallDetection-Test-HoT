@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from train_lstm import FallDetectionLSTM
+from train.train_lstm import FallDetectionLSTM
 
 def load_model_config(model_dir):
     """Load model configuration and parameters"""
