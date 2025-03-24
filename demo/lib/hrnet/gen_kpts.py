@@ -145,6 +145,11 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
     # 用于跟踪目标ID
     target_id = None
 
+    # 创建CUDA事件用于异步处理
+    if torch.cuda.is_available():
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
     for batch_idx in range(num_batches):
         start_frame = batch_idx * batch_size
         end_frame = min((batch_idx + 1) * batch_size, video_length)
@@ -152,64 +157,63 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
         
         print(f'\n处理第 {batch_idx + 1}/{num_batches} 批 (帧 {start_frame} - {end_frame})')
         
+        # 一次性读取所有帧
+        frames = []
+        for _ in tqdm(range(current_batch_size), desc=f'批次 {batch_idx + 1} - 读取帧'):
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            frames.append(frame)
+        
         print('第一阶段: YOLO人体检测...')
-        # 第一阶段：YOLO处理当前批次的所有帧
         batch_bboxs = []
         batch_scores = []
         
         if detector == 'yolo11':
             # 使用YOLO11的批处理功能
-            frames = []
-            frame_count = 0
-            
-            for _ in tqdm(range(current_batch_size), desc=f'批次 {batch_idx + 1} - 读取帧'):
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-                frames.append(frame)
-                frame_count += 1
-                
-                # 当收集够一个YOLO批次或是最后一帧时，进行批处理
-                if len(frames) == yolo_batch_size or frame_count == current_batch_size:
-                    bboxs_batch, scores_batch = yolo_det(frames, human_model, reso=det_dim, confidence=args.thred_score, quiet=True)
-                    
-                    # 处理每一帧的结果
-                    for i, (bboxs, scores) in enumerate(zip(bboxs_batch, scores_batch)):
-                        batch_bboxs.append(bboxs)
-                        batch_scores.append(scores)
-                    
-                    frames = []  # 清空帧缓存
-                    
+            for i in range(0, len(frames), yolo_batch_size):
+                batch = frames[i:i + yolo_batch_size]
+                bboxs_batch, scores_batch = yolo_det(batch, human_model, reso=det_dim, confidence=args.thred_score, quiet=True)
+                batch_bboxs.extend(bboxs_batch)
+                batch_scores.extend(scores_batch)
         else:
             # 原始的逐帧处理方式
-            for _ in tqdm(range(current_batch_size), desc=f'批次 {batch_idx + 1}'):
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-                
+            for frame in tqdm(frames, desc=f'批次 {batch_idx + 1}'):
                 bboxs, scores = yolo_det(frame, human_model, reso=det_dim, confidence=args.thred_score)
                 batch_bboxs.append(bboxs)
                 batch_scores.append(scores)
-
+        
         # 重置视频读取位置到当前批次开始
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
         print('第二阶段: HRNet姿态估计...')
-        # 第二阶段：HRNet处理当前批次
         batch_kpts = []
         batch_kpts_scores = []
         
-        for frame_idx in tqdm(range(current_batch_size), desc=f'批次 {batch_idx + 1}'):
-            ret, frame = cap.read()
-            if not ret:
-                continue
-                
+        # 预分配GPU内存并预热模型
+        if torch.cuda.is_available():
+            max_batch = min(32, current_batch_size)  # 最大HRNet批处理大小
+            dummy_input = torch.zeros((max_batch, 3, cfg.MODEL.IMAGE_SIZE[1], cfg.MODEL.IMAGE_SIZE[0])).cuda()
+            _ = pose_model(dummy_input)  # 预热GPU
+            del dummy_input
+            torch.cuda.empty_cache()
+        
+        # 收集一批次的输入数据
+        batch_inputs = []
+        batch_centers = []
+        batch_scales = []
+        batch_frame_indices = []
+        max_batch_size = 32  # HRNet的最大批处理大小
+        
+        for frame_idx in tqdm(range(len(frames)), desc=f'批次 {batch_idx + 1}'):
+            frame = frames[frame_idx]
+            
             # 获取当前帧的检测结果
             bboxs = batch_bboxs[frame_idx]
             if bboxs is None:
                 continue
-            
-            # 如果使用YOLO11，我们已经在YOLO阶段锁定了目标，直接使用检测结果
+                
+            # 处理检测框...（保持原有的检测框处理逻辑不变）
             if detector == 'yolo11':
                 track_bboxs = []
                 for bbox in bboxs:
@@ -219,23 +223,16 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
                 # 使用Sort跟踪器更新
                 people_track = people_sort.update(bboxs)
                 
-                # 如果是第一帧且有检测结果，锁定目标ID
+                # 处理目标跟踪...（保持原有的目标跟踪逻辑不变）
                 if batch_idx == 0 and frame_idx == 0 and people_track.shape[0] > 0:
-                    # 计算每个检测框的面积
                     areas = []
                     for i in range(people_track.shape[0]):
                         bbox = people_track[i, :-1]
                         area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                        areas.append((i, area, people_track[i, -1]))  # (索引, 面积, ID)
-                    
-                    # 按面积降序排序
+                        areas.append((i, area, people_track[i, -1]))
                     areas.sort(key=lambda x: x[1], reverse=True)
-                    
-                    # 锁定面积最大的人体ID
                     target_id = areas[0][2]
-                    print(f"已锁定目标ID: {target_id}, 面积: {areas[0][1]:.2f}")
                 
-                # 如果已锁定目标ID，只保留该ID的检测框
                 if target_id is not None:
                     target_idx = -1
                     for i in range(people_track.shape[0]):
@@ -246,20 +243,16 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
                     if target_idx >= 0:
                         people_track_ = people_track[target_idx, :-1].reshape(1, 4)
                     else:
-                        # 如果当前帧未找到目标ID，使用上一帧的结果
                         if batch_kpts:
-                            # 跳过当前帧，使用上一帧的关键点
                             batch_kpts.append(batch_kpts[-1])
                             batch_kpts_scores.append(batch_kpts_scores[-1])
                             continue
                         else:
-                            # 如果没有上一帧结果，尝试使用当前帧的第一个检测结果
                             if people_track.shape[0] > 0:
                                 people_track_ = people_track[0, :-1].reshape(1, 4)
                             else:
                                 continue
                 else:
-                    # 如果未锁定目标ID，使用Sort的默认行为
                     if people_track.shape[0] == 1:
                         people_track_ = people_track[-1, :-1].reshape(1, 4)
                     elif people_track.shape[0] >= 2:
@@ -273,29 +266,82 @@ def gen_video_kpts(video, det_dim=416, num_peroson=1, gen_output=False, detector
                     bbox = [round(i, 2) for i in list(bbox)]
                     track_bboxs.append(bbox)
 
-            # HRNet处理
-            with torch.no_grad():
-                inputs, origin_img, center, scale = PreProcess(frame, track_bboxs, cfg, num_peroson)
-                inputs = inputs[:, [2, 1, 0]]
-                
-                if torch.cuda.is_available():
-                    inputs = inputs.cuda()
-                output = pose_model(inputs)
-                
-                # 计算坐标
-                preds, maxvals = get_final_preds(cfg, output.clone().cpu().numpy(), np.asarray(center), np.asarray(scale))
-
-            # 保存结果
-            kpts = np.zeros((num_peroson, 17, 2), dtype=np.float32)
-            scores = np.zeros((num_peroson, 17), dtype=np.float32)
+            # 准备HRNet输入
+            inputs, origin_img, center, scale = PreProcess(frame, track_bboxs, cfg, num_peroson)
+            inputs = inputs[:, [2, 1, 0]]
             
-            for i, kpt in enumerate(preds):
-                kpts[i] = kpt
-            for i, score in enumerate(maxvals):
-                scores[i] = score.squeeze()
-
-            batch_kpts.append(kpts)
-            batch_kpts_scores.append(scores)
+            # 收集批处理数据
+            batch_inputs.append(inputs)
+            batch_centers.append(center)
+            batch_scales.append(scale)
+            batch_frame_indices.append(frame_idx)
+            
+            # 当收集够一个批次或是最后一帧时，进行批处理
+            if len(batch_inputs) == max_batch_size or frame_idx == len(frames) - 1:
+                # 合并批次数据
+                inputs_batch = torch.cat(batch_inputs, dim=0)
+                centers_batch = np.concatenate(batch_centers, axis=0)
+                scales_batch = np.concatenate(batch_scales, axis=0)
+                
+                # HRNet处理
+                with torch.no_grad():
+                    if torch.cuda.is_available():
+                        inputs_batch = inputs_batch.cuda(non_blocking=True)
+                        start_event.record()
+                    
+                    output_batch = pose_model(inputs_batch)
+                    
+                    if torch.cuda.is_available():
+                        end_event.record()
+                        # 不要立即同步，让GPU继续工作
+                    
+                    # 计算坐标
+                    preds_batch, maxvals_batch = get_final_preds(
+                        cfg, 
+                        output_batch.cpu().numpy(), 
+                        centers_batch,
+                        scales_batch
+                    )
+                    
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()  # 现在同步
+                
+                # 处理每一帧的结果
+                for i in range(len(batch_frame_indices)):
+                    kpts = np.zeros((num_peroson, 17, 2), dtype=np.float32)
+                    scores = np.zeros((num_peroson, 17), dtype=np.float32)
+                    
+                    # 只取当前帧的预测结果
+                    frame_preds = preds_batch[i:i+1]
+                    frame_maxvals = maxvals_batch[i:i+1]
+                    
+                    for j, kpt in enumerate(frame_preds):
+                        kpts[j] = kpt
+                    for j, score in enumerate(frame_maxvals):
+                        scores[j] = score.squeeze()
+                    
+                    # 将结果插入正确的位置
+                    frame_idx = batch_frame_indices[i]
+                    while len(batch_kpts) <= frame_idx:
+                        batch_kpts.append(None)
+                        batch_kpts_scores.append(None)
+                    batch_kpts[frame_idx] = kpts
+                    batch_kpts_scores[frame_idx] = scores
+                
+                # 清空批次数据
+                batch_inputs = []
+                batch_centers = []
+                batch_scales = []
+                batch_frame_indices = []
+                
+                # 清理GPU内存
+                if torch.cuda.is_available():
+                    del inputs_batch, output_batch
+                    torch.cuda.empty_cache()
+        
+        # 移除空帧
+        batch_kpts = [k for k in batch_kpts if k is not None]
+        batch_kpts_scores = [s for s in batch_kpts_scores if s is not None]
         
         # 将当前批次的结果添加到总结果中
         all_keypoints.extend(batch_kpts)

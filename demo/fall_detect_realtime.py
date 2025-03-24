@@ -353,7 +353,7 @@ class RealtimeFallDetection:
                     
                     # 进行跌倒检测
                     if self.evaluator and os.path.exists(output_3d_file):
-                        pred, prob, _ = self.evaluator.evaluate(output_3d_file, reverse=self.args.reverse)
+                        pred, prob, _ = self.evaluator.evaluate(output_3d_file, reverse=False)
                         return pred, prob
             
             return None, None
@@ -498,7 +498,7 @@ def parse_args():
                       help='Camera ID (default: 0)')
     parser.add_argument('--output_dir', type=str, default='./demo/output_detect/',
                       help='Output directory')
-    parser.add_argument('--model_dir', type=str, required=True,
+    parser.add_argument('--model_dir', type=str, default='checkpoint/fall_detection_lstm/2025-03-22-2328-b',
                       help='Fall detection model directory')
     
     # 硬件参数
@@ -516,7 +516,7 @@ def parse_args():
     
     # 实时处理参数
     parser.add_argument('--buffer_size', type=int, default=30,
-                      help='Frame buffer size (default: 30)')
+                       help='Frame buffer size (default: 30)')
     
     args = parser.parse_args()
     return args
