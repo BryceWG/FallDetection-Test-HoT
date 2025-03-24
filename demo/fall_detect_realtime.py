@@ -310,18 +310,23 @@ class RealtimeFallDetection:
 
     def _warmup_models(self):
         """预热模型，进行一次完整的处理流程"""
-        try:
-            # 创建一个测试视频片段
-            test_frames = []
-            test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            for _ in range(self.args.buffer_size):
-                test_frames.append(test_frame.copy())
-                
-            # 运行一次完整的处理流程
-            self.process_video_segment(test_frames)
-            
-        except Exception as e:
-            print(f"Warmup warning: {str(e)}")
+        # 创建一个全黑的测试帧
+        test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        test_frames = [test_frame] * 120  # 生成120帧测试数据
+        
+        print("预热模型中，这可能需要几秒钟...")
+        # 静默处理预热帧
+        with open(os.devnull, 'w') as f:
+            # 临时重定向标准输出
+            original_stdout = sys.stdout
+            sys.stdout = f
+            try:
+                self.process_video_segment(test_frames)
+            finally:
+                # 恢复标准输出
+                sys.stdout = original_stdout
+        
+        print("模型预热完成!")
 
     def process_video_segment(self, frames, need_interpolation=False):
         """处理视频片段"""
