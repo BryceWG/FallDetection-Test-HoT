@@ -11,6 +11,8 @@ from tqdm import tqdm
 import torch.nn as nn
 import json
 from collections import deque
+from queue import Queue
+import threading
 from vis import get_pose2D, get_pose3D  # 只保留姿态提取相关函数
 
 # 添加项目根目录到路径
@@ -264,16 +266,15 @@ class PoseEvaluator:
 class RealtimeFallDetection:
     """实时视频跌倒检测类"""
     def __init__(self, args):
-        """初始化实时跌倒检测
-        
-        Args:
-            args: 命令行参数
-        """
+        """初始化实时跌倒检测"""
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # 初始化帧缓冲区
-        self.frame_buffer = []
+        # 初始化队列和线程控制
+        self.frame_queue = Queue(maxsize=300)  # 原始帧队列
+        self.result_queue = Queue(maxsize=300)  # 处理结果队列
+        self.processing_queue = Queue(maxsize=10)  # 待处理的视频片段队列
+        self.stop_flag = threading.Event()
         
         # 设置输出目录
         self.output_dir = os.path.join(args.output_dir, f"camera_{args.camera}/")
@@ -284,13 +285,13 @@ class RealtimeFallDetection:
         # 初始化评估器(保持模型常驻内存)
         if args.model_dir:
             self.evaluator = PoseEvaluator(args.model_dir, self.device)
-            print(f"已加载跌倒检测模型: {args.model_dir}")
+            print(f"Model loaded: {args.model_dir}")
         else:
             self.evaluator = None
-            print("警告: 未指定模型目录，将不进行跌倒检测")
+            print("Warning: No model specified")
             
         # 初始化结果显示变量
-        self.current_status = "正常"
+        self.current_status = "Normal"
         self.current_prob = 0.0
         self.status_update_time = 0
         self.status_display_duration = args.status_duration
@@ -304,101 +305,97 @@ class RealtimeFallDetection:
         else:  # 默认使用YOLOv3
             from lib.yolov3.human_detector import load_model as yolo_model
             from lib.yolov3.human_detector import yolo_human_det as yolo_det
-        
-    def save_frames_as_video(self, frames):
-        """将帧序列保存为临时视频文件
-        
-        Args:
-            frames: 帧列表
             
-        Returns:
-            temp_video_path: 临时视频文件路径
-        """
-        if not frames:
-            return None
+    def process_video_segment(self, frames):
+        """处理视频片段"""
+        try:
+            # 保存为临时视频文件
+            temp_video_path = os.path.join(self.temp_dir, f'temp_sequence_{time.time()}.mp4')
+            height, width = frames[0].shape[:2]
             
-        # 创建临时视频文件
-        temp_video_path = os.path.join(self.temp_dir, 'temp_sequence.mp4')
-        
-        # 获取第一帧的尺寸
-        height, width = frames[0].shape[:2]
-        
-        # 创建视频写入器
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(temp_video_path, fourcc, 30, (width, height))
-        
-        # 写入帧
-        for frame in frames:
-            out.write(frame)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(temp_video_path, fourcc, 30, (width, height))
             
-        # 释放资源
-        out.release()
-        
-        return temp_video_path
-        
-    def process_frame(self, frame):
-        """处理单帧图像
-        
-        Args:
-            frame: 输入帧
+            for frame in frames:
+                out.write(frame)
+            out.release()
             
-        Returns:
-            processed_frame: 处理后的帧(带检测结果显示)
-        """
-        # 添加帧到缓冲区
-        self.frame_buffer.append(frame.copy())
-        
-        # 如果缓冲区达到指定大小,则进行处理
-        if len(self.frame_buffer) >= self.args.buffer_size:
+            if os.path.exists(temp_video_path):
+                # 生成2D姿态
+                keypoints = get_pose2D(temp_video_path, self.output_dir,
+                                     detector=self.args.detector,
+                                     batch_size=self.args.batch_size)
+                
+                if keypoints is not None and len(keypoints) > 0:
+                    # 生成3D姿态
+                    output_3d_data = get_pose3D(temp_video_path, self.output_dir, self.args.fix_z)
+                    output_3d_file = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+                    
+                    # 进行跌倒检测
+                    if self.evaluator and os.path.exists(output_3d_file):
+                        pred, prob, _ = self.evaluator.evaluate(output_3d_file, reverse=self.args.reverse)
+                        return pred, prob
+            
+            return None, None
+            
+        except Exception as e:
+            print(f"Error processing video segment: {str(e)}")
+            return None, None
+            
+        finally:
+            # 清理临时文件
             try:
-                # 将帧序列保存为临时视频
-                temp_video_path = self.save_frames_as_video(self.frame_buffer)
-                
-                if temp_video_path and os.path.exists(temp_video_path):
-                    # 生成2D姿态
-                    keypoints = get_pose2D(temp_video_path, self.output_dir,
-                                         detector=self.args.detector,
-                                         batch_size=self.args.batch_size)
-                    
-                    if keypoints is not None and len(keypoints) > 0:
-                        # 生成3D姿态
-                        output_3d_data = get_pose3D(temp_video_path, self.output_dir, self.args.fix_z)
-                        output_3d_file = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
-                        
-                        # 进行跌倒检测
-                        if self.evaluator and os.path.exists(output_3d_file):
-                            pred, prob, _ = self.evaluator.evaluate(output_3d_file, reverse=self.args.reverse)
-                            
-                            # 更新状态
-                            self.current_status = "跌倒" if pred == 1 else "正常"
-                            self.current_prob = prob
-                            self.status_update_time = time.time()
-                    
-                    # 删除临时视频文件
-                    try:
-                        os.remove(temp_video_path)
-                    except:
-                        pass
-                
-            except Exception as e:
-                print(f"处理帧时出错: {str(e)}")
-            
-            finally:
-                # 清空缓冲区
-                self.frame_buffer = []
+                if os.path.exists(temp_video_path):
+                    os.remove(temp_video_path)
+            except:
+                pass
+
+    def process_frames_thread(self):
+        """后台处理线程"""
+        frames_buffer = []
         
-        # 在帧上显示检测结果
+        while not self.stop_flag.is_set():
+            # 收集帧直到达到缓冲区大小
+            while len(frames_buffer) < self.args.buffer_size:
+                try:
+                    frame = self.frame_queue.get(timeout=1)
+                    frames_buffer.append(frame)
+                except:
+                    break
+                    
+            # 如果收集到足够的帧，进行处理
+            if len(frames_buffer) >= self.args.buffer_size:
+                pred, prob = self.process_video_segment(frames_buffer)
+                if pred is not None:
+                    self.result_queue.put((pred, prob, time.time()))
+                frames_buffer = frames_buffer[self.args.buffer_size//2:]  # 保留后半部分帧用于下次处理
+                
+            # 如果停止标志已设置且没有更多帧，退出循环
+            if self.stop_flag.is_set() and self.frame_queue.empty():
+                break
+
+    def display_frame(self, frame):
+        """在帧上显示检测结果"""
+        # 尝试获取最新的检测结果
+        try:
+            while not self.result_queue.empty():
+                pred, prob, timestamp = self.result_queue.get_nowait()
+                self.current_status = "Fall" if pred == 1 else "Normal"
+                self.current_prob = prob
+                self.status_update_time = timestamp
+        except:
+            pass
+            
+        # 显示结果
         if time.time() - self.status_update_time < self.status_display_duration:
-            # 添加半透明背景
             overlay = frame.copy()
             cv2.rectangle(overlay, (10, 10), (300, 70), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
             
-            # 添加文本
-            status_color = (0, 0, 255) if self.current_status == "跌倒" else (0, 255, 0)
-            cv2.putText(frame, f"状态: {self.current_status}", (20, 30),
+            status_color = (0, 0, 255) if self.current_status == "Fall" else (0, 255, 0)
+            cv2.putText(frame, f"Status: {self.current_status}", (20, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-            cv2.putText(frame, f"概率: {self.current_prob:.4f}", (20, 60),
+            cv2.putText(frame, f"Probability: {self.current_prob:.4f}", (20, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         return frame
@@ -408,19 +405,19 @@ class RealtimeFallDetection:
         # 打开摄像头
         cap = cv2.VideoCapture(self.args.camera)
         if not cap.isOpened():
-            print(f"错误: 无法打开摄像头 {self.args.camera}")
+            print(f"Error: Cannot open camera {self.args.camera}")
             return
         
         # 设置摄像头参数
-        cap.set(cv2.CAP_PROP_FPS, 30)  # 设置帧率为30fps
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # 设置分辨率
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
         # 获取实际的摄像头参数
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"摄像头参数: {frame_width}x{frame_height} @ {actual_fps}fps")
+        print(f"Camera parameters: {frame_width}x{frame_height} @ {actual_fps}fps")
         
         # 创建输出视频写入器
         output_path = os.path.join(self.output_dir, 'realtime_detection.mp4')
@@ -428,20 +425,26 @@ class RealtimeFallDetection:
         out = cv2.VideoWriter(output_path, fourcc, actual_fps, 
                             (frame_width, frame_height))
         
-        print(f"开始实时检测...")
+        # 启动处理线程
+        process_thread = threading.Thread(target=self.process_frames_thread)
+        process_thread.start()
+        
+        print("Starting real-time detection...")
         try:
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
                 
-                # 处理帧
-                processed_frame = self.process_frame(frame)
+                # 将帧添加到处理队列
+                try:
+                    self.frame_queue.put(frame.copy(), timeout=0.1)
+                except:
+                    pass  # 如果队列满了，跳过这一帧
                 
-                # 显示结果
-                cv2.imshow('Realtime Fall Detection', processed_frame)
-                
-                # 保存结果
+                # 显示带结果的帧
+                processed_frame = self.display_frame(frame)
+                cv2.imshow('Real-time Fall Detection', processed_frame)
                 out.write(processed_frame)
                 
                 # 按'q'退出
@@ -449,22 +452,27 @@ class RealtimeFallDetection:
                     break
                 
         finally:
+            # 设置停止标志并等待处理线程结束
+            self.stop_flag.set()
+            process_thread.join()
+            
+            # 释放资源
             cap.release()
             out.release()
             cv2.destroyAllWindows()
-            print(f"检测结束! 录像已保存至: {output_path}")
+            print(f"Detection finished! Video saved to: {output_path}")
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='实时视频跌倒检测')
+    parser = argparse.ArgumentParser(description='Real-time Fall Detection')
     
     # 输入输出参数
     parser.add_argument('--camera', type=int, default=0,
-                      help='摄像头ID(默认为0,即默认摄像头)')
+                      help='Camera ID (default: 0)')
     parser.add_argument('--output_dir', type=str, default='./demo/output_detect/',
-                      help='输出目录')
+                      help='Output directory')
     parser.add_argument('--model_dir', type=str, required=True,
-                      help='跌倒检测模型目录路径')
+                      help='Fall detection model directory')
     
     # 硬件参数
     parser.add_argument('--gpu', type=str, default='0',
@@ -472,22 +480,22 @@ def parse_args():
     
     # 姿态估计参数
     parser.add_argument('--fix_z', action='store_true',
-                      help='固定Z轴')
+                      help='Fix Z axis')
     parser.add_argument('--detector', type=str, default='yolo11', 
                       choices=['yolov3', 'yolo11'],
-                      help='选择人体检测器')
+                      help='Choose human detector')
     parser.add_argument('--batch_size', type=int, default=2000,
-                      help='帧分组大小，默认为2000帧')
+                      help='Frame batch size (default: 2000)')
     
     # 实时处理参数
     parser.add_argument('--buffer_size', type=int, default=30,
-                      help='帧缓冲区大小')
+                      help='Frame buffer size (default: 30)')
     parser.add_argument('--status_duration', type=float, default=3.0,
-                      help='状态显示持续时间(秒)')
+                      help='Status display duration in seconds (default: 3.0)')
     
     # 跌倒检测参数
     parser.add_argument('--reverse', action='store_true',
-                      help='反转输入数据的时间顺序')
+                      help='Reverse input data time order')
     
     args = parser.parse_args()
     return args
