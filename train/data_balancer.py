@@ -106,7 +106,6 @@ class SequenceDatasetWrapper:
                         sampling_strategy=sampling_strategy,
                         random_state=random_state,
                         k_neighbors=n_neighbors,
-                        n_jobs=-1  # 使用所有CPU核心
                     )
             else:
                 raise ValueError(f"不支持的平衡策略: {strategy}")

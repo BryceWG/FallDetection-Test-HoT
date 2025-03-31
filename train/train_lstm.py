@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# python train/train_lstm.py --label_file train/full_frame.csv
+# python train/train_lstm.py --label_file train/frame_data.csv
 import os
 import sys
 import glob
@@ -148,12 +148,13 @@ class LabelSmoothingBCELoss(nn.Module):
 
 class PoseSequenceDataset(Dataset):
     """姿态序列数据集
-    加载3D姿态数据和对应的标签
+    加载3D或2D姿态数据和对应的标签
     """
-    def __init__(self, data_dir, label_file, normal_seq_length=30, normal_stride=20,
+    def __init__(self, data_dir, label_file, pose_type='3d', normal_seq_length=30, normal_stride=20,
                  fall_seq_length=30, fall_stride=15, overlap_threshold=0.3,
                  transform=None, test_mode=False, pure_fall=False):
         self.data_dir = data_dir
+        self.pose_type = pose_type  # 新增：姿态类型 (2d or 3d)
         self.normal_seq_length = normal_seq_length
         self.normal_stride = normal_stride
         self.fall_seq_length = fall_seq_length
@@ -173,7 +174,35 @@ class PoseSequenceDataset(Dataset):
         self.global_mean = None
         self.global_std = None
         self._raw_labels = [sample['label'] for sample in self.samples]  # 缓存标签
+        self._feature_dim = self._get_feature_dim() # 获取特征维度
     
+    def _get_feature_dim(self):
+        """尝试加载一个样本来确定特征维度"""
+        if not self.samples:
+            # 如果没有样本，无法确定维度，可以给一个默认值或抛出错误
+            # 这里假设至少有一个样本可以加载
+            print("警告: 数据集中没有样本，无法自动确定特征维度。")
+            # 你可能需要根据实际情况返回一个预期的维度或处理此错误
+            # 例如，对于3D姿态，可能是 17*3=51，对于2D姿态，可能是 17*2=34
+            # 这里暂时返回0，表示需要后续处理
+            return 0
+
+        # 尝试加载第一个样本的数据来确定维度
+        sample = self.samples[0]
+        pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
+        if pose_data is None or len(pose_data) == 0:
+             print(f"警告: 无法加载样本 {sample['video_id']} 的数据来确定维度。")
+             return 0 # 或其他错误处理
+
+        # 假设pose_data的形状是 [frames, keypoints, dims] 或 [frames, features]
+        if len(pose_data.shape) == 3: # [frames, keypoints, dims]
+            return pose_data.shape[1] * pose_data.shape[2]
+        elif len(pose_data.shape) == 2: # 已经是 [frames, features]
+            return pose_data.shape[1]
+        else:
+            print(f"警告: 加载的姿态数据维度不符合预期: {pose_data.shape}")
+            return 0
+
     def fit_scaler(self, indices=None):
         """
         计算指定索引数据的均值和标准差，用于Z-score标准化
@@ -188,6 +217,7 @@ class PoseSequenceDataset(Dataset):
         samples_to_process = [self.samples[i] for i in indices] if indices is not None else self.samples
         
         for sample in tqdm(samples_to_process, desc="加载数据"):
+            # 注意：这里调用 _load_pose_data 时可能需要传递 pose_type，但目前 _load_pose_data 内部已使用 self.pose_type
             pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
             if pose_data is None:
                 continue
@@ -208,40 +238,83 @@ class PoseSequenceDataset(Dataset):
         # 避免除零
         self.global_std[self.global_std < 1e-7] = 1.0
         
+        # 验证特征维度是否匹配
+        if self.global_mean.shape[0] != self._feature_dim:
+             print(f"警告: 计算得到的标准化维度 ({self.global_mean.shape[0]}) 与预期特征维度 ({self._feature_dim}) 不符。")
+
         print(f"全局均值范围: [{self.global_mean.min():.3f}, {self.global_mean.max():.3f}]")
         print(f"全局标准差范围: [{self.global_std.min():.3f}, {self.global_std.max():.3f}]")
     
     def _load_pose_data(self, video_id, has_fall):
-        """加载3D姿态数据
+        """加载3D或2D姿态数据
         
         Args:
             video_id: 视频ID
-            has_fall: 是否为跌倒视频
+            has_fall: 是否为跌倒视频 (当前未使用，但保留接口)
             
         Returns:
-            numpy array: 3D姿态数据
+            numpy array: 姿态数据，形状为 [frames, num_keypoints, dims] 或 None
         """
-        # 统一使用output_keypoints_3d.npz
-        npz_file = os.path.join(self.data_dir, video_id, 
-                               'output_3D/output_keypoints_3d.npz')
-            
+        if self.pose_type == '3d':
+            npz_file = os.path.join(self.data_dir, video_id,
+                                   'output_3D/output_keypoints_3d.npz')
+            key = 'reconstruction'
+            expected_dims = 3 # 3D数据预期是 [frames, keypoints, 3]
+        elif self.pose_type == '2d':
+            npz_file = os.path.join(self.data_dir, video_id,
+                                   'input_2D/input_keypoints_2d.npz')
+            key = 'reconstruction'  # 2D数据也是使用'reconstruction'作为键名保存的
+            expected_dims = 3 # 2D数据预期是 [frames, keypoints, 2]
+        else:
+            raise ValueError(f"不支持的姿态类型: {self.pose_type}")
+
         if not os.path.exists(npz_file):
             print(f"警告: 找不到文件 {npz_file}")
             return None
+
+        try:
+            data = np.load(npz_file, allow_pickle=True)
+            if key not in data:
+                 print(f"警告: 在文件 {npz_file} 中找不到键 '{key}'")
+                 return None
+            pose_data = data[key]
             
-        return np.load(npz_file, allow_pickle=True)['reconstruction']
+            # 检查并修正维度 (特别是针对2D数据可能存在的额外维度)
+            if self.pose_type == '2d' and len(pose_data.shape) == 4 and pose_data.shape[0] == 1:
+                # 如果是2D数据，且维度是 [1, frames, keypoints, 2]，则移除第一个维度
+                pose_data = np.squeeze(pose_data, axis=0)
+            elif len(pose_data.shape) != expected_dims:
+                print(f"警告: 文件 {npz_file} 加载的数据维度 {pose_data.shape} 与预期 {expected_dims} 不符")
+                # 可以选择返回 None 或尝试处理，这里返回 None
+                return None
+                
+            # 确保数据是浮点类型
+            return pose_data.astype(np.float32)
+        except Exception as e:
+            print(f"错误: 加载或处理文件 {npz_file} 时出错: {e}")
+            return None
     
     def _create_sequence_samples(self):
         self.samples = []
         
+        # 记录数据加载过程的统计信息
+        stats = {
+            "total_videos": 0,
+            "videos_with_missing_data": 0,
+            "missing_video_ids": []
+        }
+        
         # 遍历所有视频
         for _, row in self.labels_df.iterrows():
+            stats["total_videos"] += 1
             video_id = row['video_id']
             has_fall = int(row['has_fall'])
             
             # 加载姿态数据
             pose_data = self._load_pose_data(video_id, has_fall)
             if pose_data is None:
+                stats["videos_with_missing_data"] += 1
+                stats["missing_video_ids"].append(video_id)
                 continue
                 
             total_frames = len(pose_data)
@@ -343,11 +416,51 @@ class PoseSequenceDataset(Dataset):
         non_fall_samples = total_samples - fall_samples
         
         print(f"\n数据集统计信息:")
+        print(f"总视频数: {stats['total_videos']}")
+        print(f"成功加载视频数: {stats['total_videos'] - stats['videos_with_missing_data']}")
+        print(f"未找到{self.pose_type}姿态数据的视频数: {stats['videos_with_missing_data']}")
+        if stats["videos_with_missing_data"] > 0:
+            print(f"前5个缺失数据的视频ID: {stats['missing_video_ids'][:5]}")
+            
+            # 尝试检查第一个缺失视频的文件路径是否存在
+            if stats["missing_video_ids"]:
+                first_missing = stats["missing_video_ids"][0]
+                if self.pose_type == '3d':
+                    expected_path = os.path.join(self.data_dir, first_missing, 'output_3D/output_keypoints_3d.npz')
+                else:
+                    expected_path = os.path.join(self.data_dir, first_missing, 'input_2D/input_keypoints_2d.npz')
+                print(f"检查路径是否存在: {expected_path}")
+                print(f"路径存在: {os.path.exists(expected_path)}")
+                
+                # 检查父目录
+                parent_dir = os.path.dirname(expected_path)
+                print(f"父目录存在: {os.path.exists(parent_dir)}")
+                
+                # 如果父目录存在，列出其内容
+                if os.path.exists(parent_dir):
+                    print(f"父目录 {parent_dir} 内容:")
+                    try:
+                        files = os.listdir(parent_dir)
+                        for file in files[:10]:  # 只显示前10个文件
+                            print(f"  - {file}")
+                        if len(files) > 10:
+                            print(f"  ... 以及 {len(files) - 10} 个其他文件")
+                    except Exception as e:
+                        print(f"无法列出目录内容: {e}")
+        
         print(f"总样本数: {total_samples}")
         print(f"跌倒样本数: {fall_samples}")
         print(f"非跌倒样本数: {non_fall_samples}")
         if total_samples > 0:
             print(f"跌倒/非跌倒比例: {fall_samples/non_fall_samples:.2f}")
+            
+        # 如果没有样本，给出更明确的警告
+        if total_samples == 0:
+            print(f"\n警告：未找到任何有效的{self.pose_type}姿态数据样本！")
+            print(f"请检查:")
+            print(f"1. 数据目录 {self.data_dir} 是否包含视频子目录")
+            print(f"2. 视频子目录中是否包含 {'input_2D/input_keypoints_2d.npz' if self.pose_type == '2d' else 'output_3D/output_keypoints_3d.npz'} 文件")
+            print(f"3. 标签文件中的视频ID是否与数据目录中的子目录名称匹配")
     
     def __len__(self):
         return len(self.samples)
@@ -355,9 +468,19 @@ class PoseSequenceDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        # 加载3D姿态数据
+        # 加载姿态数据 (使用self.pose_type)
         pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
         
+        if pose_data is None:
+             # 处理数据加载失败的情况，例如返回一个空字典或抛出异常
+             # 这里我们返回一个包含标识符的字典，让DataLoader的collate_fn处理或跳过
+             print(f"警告: 无法加载样本 {idx} 的数据 (video_id: {sample['video_id']})")
+             # 返回一个可以被 collate_fn 识别并过滤掉的特殊值，或者你需要修改 collate_fn
+             # 或者，更简单的方式是在 _create_sequence_samples 中就跳过无法加载的视频
+             # 为保持简单，我们先假设 _create_sequence_samples 已过滤掉无法加载的视频
+             # 如果仍然出现 None，这里应该抛出更明确的错误
+             raise RuntimeError(f"无法加载样本 {idx} (video_id: {sample['video_id']}) 的姿态数据")
+
         # 截取指定范围的序列
         start_idx = sample['start_idx']
         end_idx = sample['end_idx']
@@ -380,6 +503,12 @@ class PoseSequenceDataset(Dataset):
             # 如果序列长度足够，直接截取指定长度并展平
             sequence = sequence[:self.normal_seq_length]
             flattened_sequence = sequence.reshape(self.normal_seq_length, -1)
+        
+        # 验证展平后的特征维度是否正确
+        if flattened_sequence.shape[1] != self._feature_dim:
+            print(f"警告: 样本 {idx} (video_id: {sample['video_id']}) 的展平维度 ({flattened_sequence.shape[1]}) 与数据集预期维度 ({self._feature_dim}) 不符。")
+            # 你可能需要根据情况处理这个不匹配，例如跳过这个样本或重新调整
+            # 这里暂时继续，但标准化可能会出错
         
         # 使用Z-score标准化
         if self.transform:
@@ -667,8 +796,10 @@ def process_args():
     处理命令行参数
     """
     parser = argparse.ArgumentParser(description='跌倒检测模型训练')
-    parser.add_argument('--data_dir', type=str, default='./demo/output/', help='3D姿态数据目录')
+    parser.add_argument('--data_dir', type=str, default='./demo/output/', help='姿态数据根目录')
     parser.add_argument('--label_file', type=str, required=False, help='标签文件路径(CSV格式)')
+    parser.add_argument('--pose_type', type=str, default='3d', choices=['2d', '3d'],
+                       help='使用的姿态数据类型 (2d or 3d)')
     
     # 非跌倒视频的序列参数
     parser.add_argument('--normal_seq_length', type=int, default=30, help='非跌倒视频序列长度')
@@ -698,11 +829,9 @@ def process_args():
     parser.add_argument('--num_layers', type=int, default=2, help='LSTM层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
     
-    # 生成带时间戳的保存目录
-    timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
-    default_save_dir = f'./checkpoint/fall_detection_lstm/{timestamp}'
-    
-    parser.add_argument('--save_dir', type=str, default=default_save_dir, help='模型保存目录')
+    # --save_dir 定义时不设置复杂的默认值
+    parser.add_argument('--save_dir', type=str, default=None, 
+                       help='模型保存目录 (默认: ./checkpoint/fall_detection_lstm_{pose_type}/{timestamp})')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--checkpoint', type=str, default=None, help='加载checkpoint路径')
@@ -711,7 +840,14 @@ def process_args():
     parser.add_argument('--pure_fall', action='store_true',
                        help='启用纯跌倒模式,从标签文件中读取跌倒片段起始帧')
     
+    # 只在这里进行一次完整的参数解析
     args = parser.parse_args()
+    
+    # 如果用户没有提供 save_dir，则在解析后生成默认值
+    if args.save_dir is None:
+        timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
+        args.save_dir = f'./checkpoint/fall_detection_lstm_{args.pose_type}/{timestamp}'
+        
     return args
 
 def save_training_summary(args, train_results, test_results, save_dir, dataset):
@@ -720,6 +856,7 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
     params = {
         "data_params": {
             "data_dir": args.data_dir,
+            "pose_type": args.pose_type,
             "normal_seq_length": args.normal_seq_length,
             "normal_stride": args.normal_stride,
             "fall_seq_length": args.fall_seq_length,
@@ -740,8 +877,8 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
             "seed": args.seed
         },
         "normalization_params": {
-            "mean": dataset.global_mean.tolist(),
-            "std": dataset.global_std.tolist()
+            "mean": dataset.global_mean.tolist() if dataset.global_mean is not None else None,
+            "std": dataset.global_std.tolist() if dataset.global_std is not None else None
         }
     }
     
@@ -780,7 +917,11 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
 def main():
 
     args = process_args()
-    
+    # 在解析参数后，重新构建默认的 save_dir，因为默认值是在解析前基于初步的 args 创建的
+    if args.save_dir == f'./checkpoint/fall_detection_lstm_{args.pose_type}/{datetime.now().strftime("%Y-%m-%d-%H%M")}': # 检查是否是未替换 pose_type 的默认路径
+        timestamp = datetime.now().strftime('%Y-%m-%d-%H%M')
+        args.save_dir = f'./checkpoint/fall_detection_lstm_{args.pose_type}/{timestamp}'
+
     # 设置随机种子
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -813,6 +954,7 @@ def main():
     full_dataset = PoseSequenceDataset(
         data_dir=args.data_dir,
         label_file=args.label_file,
+        pose_type=args.pose_type,
         normal_seq_length=args.normal_seq_length,
         normal_stride=args.normal_stride,
         fall_seq_length=args.fall_seq_length,
@@ -892,10 +1034,14 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
-    # 计算输入特征维度(姿态关键点数量 * 3)
-    sample_item = full_dataset[0]
-    input_dim = sample_item['sequence'].shape[1]
-    print(f"输入特征维度: {input_dim}")
+    # 计算输入特征维度
+    # 从数据集中获取特征维度
+    input_dim = full_dataset._feature_dim
+    if input_dim == 0:
+         print("错误: 无法确定输入特征维度，请检查数据加载过程。")
+         return # 或者设置一个默认值并打印警告
+
+    print(f"输入特征维度 (基于 {args.pose_type} 数据): {input_dim}")
     
     # 创建模型
     model = FallDetectionLSTM(
