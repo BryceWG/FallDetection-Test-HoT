@@ -1124,20 +1124,20 @@ def plot_cv_metrics(fold_metrics, avg_metrics, save_dir):
     # 绘制折线图
     plt.figure(figsize=(12, 8))
     
-    plt.plot(folds, accuracies, 'o-', label='准确率')
-    plt.plot(folds, precisions, 's-', label='精确率')
-    plt.plot(folds, recalls, '^-', label='召回率')
-    plt.plot(folds, f1_scores, 'd-', label='F1分数')
+    plt.plot(folds, accuracies, 'o-', label='Accuracy')
+    plt.plot(folds, precisions, 's-', label='Precision')
+    plt.plot(folds, recalls, '^-', label='Recall')
+    plt.plot(folds, f1_scores, 'd-', label='F1 Score')
     
     # 添加平均值水平线
-    plt.axhline(y=avg_metrics['avg_accuracy'], color='blue', linestyle='--', alpha=0.5, label='平均准确率')
-    plt.axhline(y=avg_metrics['avg_precision'], color='orange', linestyle='--', alpha=0.5, label='平均精确率')
-    plt.axhline(y=avg_metrics['avg_recall'], color='green', linestyle='--', alpha=0.5, label='平均召回率')
-    plt.axhline(y=avg_metrics['avg_f1'], color='red', linestyle='--', alpha=0.5, label='平均F1分数')
+    plt.axhline(y=avg_metrics['avg_accuracy'], color='blue', linestyle='--', alpha=0.5, label='Mean Accuracy')
+    plt.axhline(y=avg_metrics['avg_precision'], color='orange', linestyle='--', alpha=0.5, label='Mean Precision')
+    plt.axhline(y=avg_metrics['avg_recall'], color='green', linestyle='--', alpha=0.5, label='Mean Recall')
+    plt.axhline(y=avg_metrics['avg_f1'], color='red', linestyle='--', alpha=0.5, label='Mean F1')
     
-    plt.xlabel('折数')
-    plt.ylabel('指标值')
-    plt.title('交叉验证各折指标')
+    plt.xlabel('Fold Number')
+    plt.ylabel('Metric Value')
+    plt.title('Cross Validation Metrics by Fold')
     plt.xticks(folds)
     plt.ylim(0, 1.05)
     plt.grid(True, alpha=0.3)
