@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -813,6 +813,10 @@ def process_args():
     parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
     parser.add_argument('--val_ratio', type=float, default=0.25, help='验证集占训练数据的比例')
     
+    # 交叉验证参数 - 简化参数设置
+    parser.add_argument('--n_splits', type=int, default=0, 
+                       help='交叉验证折数,大于0则启用交叉验证,默认使用分层K折交叉验证')
+    
     # 数据平衡参数
     parser.add_argument('--balance_strategy', type=str, default='smote', 
                        choices=['none', 'oversample', 'undersample', 'smote'],
@@ -914,6 +918,235 @@ def save_training_summary(args, train_results, test_results, save_dir, dataset):
     print(f"\n训练摘要已保存至: {summary_file}")
     return summary
 
+def run_cross_validation(full_dataset, args, device):
+    """
+    执行K折交叉验证
+    """
+    print(f"\n开始{args.n_splits}折分层交叉验证...")
+    
+    # 使用分层K折交叉验证
+    kfold = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.seed)
+    splits = kfold.split(np.arange(len(full_dataset)), full_dataset._raw_labels)
+    
+    # 存储每折的指标
+    fold_metrics = []
+    
+    for fold, (train_val_idx, test_idx) in enumerate(splits):
+        print(f"\n{'='*20} 第 {fold+1}/{args.n_splits} 折 {'='*20}")
+        
+        # 为当前折创建保存目录
+        fold_save_dir = os.path.join(args.save_dir, f'fold_{fold+1}')
+        os.makedirs(fold_save_dir, exist_ok=True)
+        
+        # 进一步划分训练集和验证集
+        train_idx, val_idx = train_test_split(
+            train_val_idx,
+            test_size=args.val_ratio,
+            stratify=[full_dataset._raw_labels[i] for i in train_val_idx],
+            random_state=args.seed
+        )
+        
+        # 使用训练集数据计算标准化参数
+        full_dataset.fit_scaler(train_idx)
+        
+        # 创建数据子集
+        train_dataset = torch.utils.data.Subset(full_dataset, train_idx)
+        val_dataset = torch.utils.data.Subset(full_dataset, val_idx)
+        test_dataset = torch.utils.data.Subset(full_dataset, test_idx)
+        
+        print(f"训练集大小: {len(train_dataset)}")
+        print(f"验证集大小: {len(val_dataset)}")
+        print(f"测试集大小: {len(test_dataset)}")
+        
+        # 创建数据加载器
+        if args.balance_strategy != 'none':
+            # 使用数据平衡策略
+            train_labels = [full_dataset._raw_labels[i] for i in train_idx]
+            label_counts = Counter(train_labels)
+            
+            if args.target_ratio != 1.0:
+                max_count = max(label_counts.values())
+                target_counts = {
+                    0: int(max_count),
+                    1: int(max_count * args.target_ratio)
+                }
+            else:
+                target_counts = 'auto'
+                
+            print(f"\n使用{args.balance_strategy}策略平衡数据...")
+            train_loader = create_balanced_loader(
+                dataset=train_dataset,
+                batch_size=args.batch_size,
+                strategy=args.balance_strategy,
+                sampling_strategy=target_counts,
+                shuffle=True,
+                num_workers=4
+            )
+        else:
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=4
+            )
+        
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+        
+        # 创建模型
+        input_dim = full_dataset._feature_dim
+        model = FallDetectionLSTM(
+            input_dim=input_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout
+        ).to(device)
+        
+        # 定义损失函数和优化器
+        criterion = FocalLoss(alpha=0.25, gamma=2.0)
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
+        
+        # 训练模型
+        print(f"\n开始第 {fold+1} 折训练...")
+        model, history = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            num_epochs=args.num_epochs,
+            device=device,
+            scheduler=scheduler,
+            save_dir=fold_save_dir
+        )
+        
+        # 加载最佳模型进行测试
+        best_model_path = os.path.join(fold_save_dir, 'best_model.pth')
+        if os.path.exists(best_model_path):
+            checkpoint = torch.load(best_model_path)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            best_val_results = {
+                "val_loss": checkpoint['val_loss'],
+                "val_acc": checkpoint['val_acc'],
+                "epoch": checkpoint['epoch']
+            }
+        
+        # 评估模型
+        print(f"评估第 {fold+1} 折模型...")
+        test_results = evaluate_model(model, test_loader, criterion, device, fold_save_dir)
+        
+        # 记录当前折的指标
+        fold_metrics.append({
+            'fold': fold + 1,
+            'train_results': best_val_results,
+            'test_results': test_results
+        })
+    
+    # 计算并保存交叉验证平均指标
+    avg_metrics = calculate_cv_metrics(fold_metrics, args.save_dir)
+    
+    return fold_metrics, avg_metrics
+
+def calculate_cv_metrics(fold_metrics, save_dir):
+    """
+    计算交叉验证的平均指标
+    """
+    # 提取各折的测试指标
+    test_losses = []
+    test_accuracies = []
+    test_precisions = []
+    test_recalls = []
+    test_f1_scores = []
+    
+    for fold_data in fold_metrics:
+        test_results = fold_data['test_results']
+        test_losses.append(test_results['test_loss'])
+        
+        # 从分类报告中提取指标
+        class_report = test_results['classification_report']
+        test_accuracies.append(class_report['accuracy'])
+        
+        # 提取跌倒类(类别1)的指标
+        test_precisions.append(class_report['1']['precision'])
+        test_recalls.append(class_report['1']['recall'])
+        test_f1_scores.append(class_report['1']['f1-score'])
+    
+    # 计算平均指标
+    avg_metrics = {
+        'avg_test_loss': np.mean(test_losses),
+        'std_test_loss': np.std(test_losses),
+        'avg_accuracy': np.mean(test_accuracies),
+        'std_accuracy': np.std(test_accuracies),
+        'avg_precision': np.mean(test_precisions),
+        'std_precision': np.std(test_precisions),
+        'avg_recall': np.mean(test_recalls),
+        'std_recall': np.std(test_recalls),
+        'avg_f1': np.mean(test_f1_scores),
+        'std_f1': np.std(test_f1_scores)
+    }
+    
+    # 打印平均指标
+    print("\n交叉验证平均指标:")
+    print(f"测试损失: {avg_metrics['avg_test_loss']:.4f} ± {avg_metrics['std_test_loss']:.4f}")
+    print(f"准确率: {avg_metrics['avg_accuracy']:.4f} ± {avg_metrics['std_accuracy']:.4f}")
+    print(f"精确率: {avg_metrics['avg_precision']:.4f} ± {avg_metrics['std_precision']:.4f}")
+    print(f"召回率: {avg_metrics['avg_recall']:.4f} ± {avg_metrics['std_recall']:.4f}")
+    print(f"F1分数: {avg_metrics['avg_f1']:.4f} ± {avg_metrics['std_f1']:.4f}")
+    
+    # 保存交叉验证结果
+    cv_results = {
+        'fold_metrics': fold_metrics,
+        'avg_metrics': avg_metrics
+    }
+    
+    with open(os.path.join(save_dir, 'cv_results.json'), 'w', encoding='utf-8') as f:
+        # 将numpy数组转换为列表以便JSON序列化
+        json_results = json.dumps(cv_results, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x, indent=4, ensure_ascii=False)
+        f.write(json_results)
+    
+    # 绘制交叉验证结果图表
+    plot_cv_metrics(fold_metrics, avg_metrics, save_dir)
+    
+    return avg_metrics
+
+def plot_cv_metrics(fold_metrics, avg_metrics, save_dir):
+    """
+    绘制交叉验证指标图表
+    """
+    # 提取各折的测试准确率、精确率、召回率和F1分数
+    folds = [data['fold'] for data in fold_metrics]
+    accuracies = [data['test_results']['classification_report']['accuracy'] for data in fold_metrics]
+    precisions = [data['test_results']['classification_report']['1']['precision'] for data in fold_metrics]
+    recalls = [data['test_results']['classification_report']['1']['recall'] for data in fold_metrics]
+    f1_scores = [data['test_results']['classification_report']['1']['f1-score'] for data in fold_metrics]
+    
+    # 绘制折线图
+    plt.figure(figsize=(12, 8))
+    
+    plt.plot(folds, accuracies, 'o-', label='准确率')
+    plt.plot(folds, precisions, 's-', label='精确率')
+    plt.plot(folds, recalls, '^-', label='召回率')
+    plt.plot(folds, f1_scores, 'd-', label='F1分数')
+    
+    # 添加平均值水平线
+    plt.axhline(y=avg_metrics['avg_accuracy'], color='blue', linestyle='--', alpha=0.5, label='平均准确率')
+    plt.axhline(y=avg_metrics['avg_precision'], color='orange', linestyle='--', alpha=0.5, label='平均精确率')
+    plt.axhline(y=avg_metrics['avg_recall'], color='green', linestyle='--', alpha=0.5, label='平均召回率')
+    plt.axhline(y=avg_metrics['avg_f1'], color='red', linestyle='--', alpha=0.5, label='平均F1分数')
+    
+    plt.xlabel('折数')
+    plt.ylabel('指标值')
+    plt.title('交叉验证各折指标')
+    plt.xticks(folds)
+    plt.ylim(0, 1.05)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'cv_metrics.png'))
+    plt.close()
+
 def main():
 
     args = process_args()
@@ -965,6 +1198,13 @@ def main():
     
     print(f"数据集大小: {len(full_dataset)}")
     
+    # 检查是否执行交叉验证
+    if args.n_splits > 0:
+        fold_metrics, avg_metrics = run_cross_validation(full_dataset, args, device)
+        print("\n交叉验证完成!")
+        return avg_metrics
+    
+    # 标准训练流程 (非交叉验证模式)
     # 划分训练集和测试集
     train_indices, test_indices = train_test_split(
         range(len(full_dataset)),
