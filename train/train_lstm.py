@@ -57,32 +57,35 @@ class FallDetectionLSTM(nn.Module):
     输入: 姿态序列数据 [batch_size, sequence_length, feature_dim]
     输出: 二分类结果 [batch_size, 1]
     """
-    def __init__(self, input_dim, hidden_dim, num_layers, dropout=0.2):
+    def __init__(self, input_dim, hidden_dim, num_layers, dropout=0.2, bidirectional=False):
         super(FallDetectionLSTM, self).__init__()
         
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.bidirectional = bidirectional
         
-        # 单向LSTM层
+        # LSTM层 - 支持单向或双向
         self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
-            bidirectional=False  # 改为单向LSTM
+            bidirectional=bidirectional  # 根据参数决定是否使用双向LSTM
         )
         
-        # 注意力机制 - 调整维度以适应单向LSTM
+        # 注意力机制 - 调整维度以适应单向或双向LSTM
+        attention_input_dim = hidden_dim * 2 if bidirectional else hidden_dim
         self.attention = nn.Sequential(
-            nn.Linear(hidden_dim, 64),  # 输入维度减半
+            nn.Linear(attention_input_dim, 64),
             nn.Tanh(),
             nn.Linear(64, 1)
         )
         
-        # 分类层 - 简化结构并添加BatchNorm
+        # 分类层 - 简化结构并添加BatchNorm，适配单向或双向LSTM输出
+        classifier_input_dim = hidden_dim * 2 if bidirectional else hidden_dim
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
+            nn.Linear(classifier_input_dim, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -92,14 +95,14 @@ class FallDetectionLSTM(nn.Module):
     
     def forward(self, x):
         # LSTM前向传播
-        lstm_out, _ = self.lstm(x)  # [batch_size, seq_len, hidden_dim]
+        lstm_out, _ = self.lstm(x)  # [batch_size, seq_len, hidden_dim] 或 [batch_size, seq_len, hidden_dim*2]
         
         # 注意力机制
         attention_weights = self.attention(lstm_out)  # [batch_size, seq_len, 1]
         attention_weights = torch.softmax(attention_weights, dim=1)
         
         # 加权求和得到上下文向量
-        context = torch.sum(attention_weights * lstm_out, dim=1)  # [batch_size, hidden_dim]
+        context = torch.sum(attention_weights * lstm_out, dim=1)  # [batch_size, hidden_dim] 或 [batch_size, hidden_dim*2]
         
         # 分类
         output = self.classifier(context)  # [batch_size, 1]
@@ -832,6 +835,7 @@ def process_args():
     parser.add_argument('--hidden_dim', type=int, default=128, help='LSTM隐藏层维度')
     parser.add_argument('--num_layers', type=int, default=2, help='LSTM层数')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout比例')
+    parser.add_argument('--lstm_bi', action='store_true', help='是否使用双向LSTM架构')
     
     # --save_dir 定义时不设置复杂的默认值
     parser.add_argument('--save_dir', type=str, default=None, 
@@ -999,7 +1003,8 @@ def run_cross_validation(full_dataset, args, device):
             input_dim=input_dim,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
-            dropout=args.dropout
+            dropout=args.dropout,
+            bidirectional=args.lstm_bi
         ).to(device)
         
         # 定义损失函数和优化器
@@ -1288,7 +1293,8 @@ def main():
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
-        dropout=args.dropout
+        dropout=args.dropout,
+        bidirectional=args.lstm_bi
     ).to(device)
     
     print(model)
