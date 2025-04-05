@@ -12,6 +12,10 @@ import torch.nn as nn
 import json
 from vis import get_pose2D, get_pose3D  # 只保留姿态提取相关函数
 import glob  # 添加glob模块用于文件搜索
+import pandas as pd  # 添加pandas用于读取CSV
+from sklearn.metrics import confusion_matrix, classification_report  # 用于计算混淆矩阵
+import seaborn as sns  # 用于绘制混淆矩阵
+import matplotlib.pyplot as plt  # 用于绘图
 
 # 添加项目根目录到路径
 sys.path.append(os.getcwd())
@@ -329,6 +333,32 @@ class FallDetectionOnVideo:
         minutes, seconds = divmod(total_time, 60)
         print(f"\n✓ 处理完成! 总耗时: {int(minutes)}分{seconds:.1f}秒")
 
+def plot_confusion_matrix(y_true, y_pred, output_dir):
+    """绘制混淆矩阵
+    
+    Args:
+        y_true: 真实标签列表
+        y_pred: 预测标签列表
+        output_dir: 输出目录
+    """
+    # 计算混淆矩阵
+    cm = confusion_matrix(y_true, y_pred)
+    
+    # 创建图形
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['正常', '跌倒'],
+                yticklabels=['正常', '跌倒'])
+    plt.title('混淆矩阵')
+    plt.xlabel('预测标签')
+    plt.ylabel('真实标签')
+    
+    # 保存图形
+    output_file = os.path.join(output_dir, 'confusion_matrix.png')
+    plt.savefig(output_file)
+    plt.close()
+    print(f"混淆矩阵已保存至: {output_file}")
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='视频跌倒检测')
@@ -342,6 +372,8 @@ def parse_args():
                       help='输出目录')
     parser.add_argument('--model_dir', type=str, default='checkpoint/fall_detection_lstm/2025-03-22-2328-b',
                       help='跌倒检测模型目录路径')
+    parser.add_argument('--ground_truth', type=str, default=None,
+                      help='标注数据CSV文件路径')
     
     # 硬件参数
     parser.add_argument('--gpu', type=str, default='0',
@@ -378,6 +410,15 @@ def main():
     if args.video is not None and args.video_dir is not None:
         print("警告: 同时提供了单个视频和视频文件夹路径，将优先处理视频文件夹")
     
+    # 读取标注数据（如果提供）
+    ground_truth = None
+    if args.ground_truth:
+        if not os.path.exists(args.ground_truth):
+            print(f"警告: 找不到标注文件 '{args.ground_truth}'")
+        else:
+            ground_truth = pd.read_csv(args.ground_truth)
+            print(f"已加载标注数据，共 {len(ground_truth)} 条记录")
+    
     # 处理单个视频
     if args.video_dir is None and args.video is not None:
         detector = FallDetectionOnVideo(args)
@@ -386,7 +427,6 @@ def main():
     
     # 处理视频文件夹
     video_dir = args.video_dir
-    # 支持常见视频格式
     video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.flv', '*.wmv']
     video_files = []
     
@@ -394,28 +434,29 @@ def main():
     for ext in video_extensions:
         video_files.extend(glob.glob(os.path.join(video_dir, ext)))
     
-    # 检查是否找到视频文件
     if len(video_files) == 0:
         print(f"错误: 在目录 '{video_dir}' 中未找到任何视频文件")
         return
     
-    # 显示找到的视频文件
     print(f"在目录 '{video_dir}' 中找到 {len(video_files)} 个视频文件")
     for i, video_file in enumerate(video_files):
         print(f"{i+1}. {os.path.basename(video_file)}")
     
     # 处理每个视频文件
     results = []
+    y_true = []  # 真实标签
+    y_pred = []  # 预测标签
+    
     for i, video_file in enumerate(video_files):
         print(f"\n[{i+1}/{len(video_files)}] 处理视频: {os.path.basename(video_file)}")
+        video_name = os.path.splitext(os.path.basename(video_file))[0]
+        
         # 更新args中的视频路径
         args.video = video_file
-        # 创建检测器并处理视频
         detector = FallDetectionOnVideo(args)
         
         # 记录开始时间
         video_start_time = time.time()
-        # 处理视频
         detector.process()
         
         # 记录结束时间和结果
@@ -423,34 +464,75 @@ def main():
         video_total_time = video_end_time - video_start_time
         minutes, seconds = divmod(video_total_time, 60)
         
-        # 如果使用了评估器，获取检测结果
         result_info = {
-            'video_name': os.path.basename(video_file),
+            'video_name': video_name,
             'processing_time': f"{int(minutes)}分{seconds:.1f}秒"
         }
         
         if detector.evaluator:
-            # 获取3D姿态文件路径
             output_3d_file = os.path.join(detector.output_dir, 'output_3D', 'output_keypoints_3d.npz')
-            # 评估结果
-            pred, prob, _ = detector.evaluator.evaluate(output_3d_file, reverse=args.reverse)
+            pred, prob, segment_results = detector.evaluator.evaluate(output_3d_file, reverse=args.reverse)
             result = "跌倒" if pred == 1 else "正常"
             result_info['prediction'] = result
             result_info['fall_probability'] = f"{prob:.4f}"
+            
+            # 如果有标注数据，进行对比
+            if ground_truth is not None:
+                gt_row = ground_truth[ground_truth['video_id'] == video_name]
+                if not gt_row.empty:
+                    gt_has_fall = gt_row.iloc[0]['has_fall']
+                    result_info['ground_truth'] = "跌倒" if gt_has_fall == 1 else "正常"
+                    result_info['is_correct'] = pred == gt_has_fall
+                    
+                    # 记录用于混淆矩阵
+                    y_true.append(gt_has_fall)
+                    y_pred.append(pred)
+                else:
+                    result_info['ground_truth'] = "未知"
+                    result_info['is_correct'] = None
         
         results.append(result_info)
     
     # 打印所有视频的处理结果汇总
-    print("\n" + "="*50)
+    print("\n" + "="*60)
     print("所有视频处理结果汇总:")
-    print("="*50)
+    print("="*60)
+    
+    correct_count = 0
+    total_count = 0
+    
     for i, result in enumerate(results):
         print(f"{i+1}. {result['video_name']}:")
         print(f"   处理时间: {result['processing_time']}")
         if 'prediction' in result:
             print(f"   预测结果: {result['prediction']}")
             print(f"   跌倒概率: {result['fall_probability']}")
-        print("-"*50)
+            if 'ground_truth' in result:
+                print(f"   真实标签: {result['ground_truth']}")
+                if result['is_correct'] is not None:
+                    status = "✓" if result['is_correct'] else "✗"
+                    print(f"   判断结果: {status}")
+                    if result['is_correct']:
+                        correct_count += 1
+                    total_count += 1
+        print("-"*60)
+    
+    # 如果有标注数据，计算并显示评估指标
+    if ground_truth is not None and len(y_true) > 0:
+        print("\n性能评估:")
+        print("="*60)
+        
+        # 计算准确率
+        accuracy = correct_count / total_count if total_count > 0 else 0
+        print(f"准确率: {accuracy:.2%} ({correct_count}/{total_count})")
+        
+        # 打印分类报告
+        report = classification_report(y_true, y_pred, target_names=['正常', '跌倒'])
+        print("\n详细评估指标:")
+        print(report)
+        
+        # 绘制混淆矩阵
+        plot_confusion_matrix(y_true, y_pred, args.output_dir)
 
 if __name__ == "__main__":
     main()
