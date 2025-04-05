@@ -46,6 +46,7 @@ def draw_bbox(image, bbox, color=(0, 255, 0), thickness=2, text=None):
 def process_video(video_path, output_dir, model, args):
     """
     处理单个视频文件，检测目标锁定情况
+    持续检测直到发现人体
     """
     # 重置目标锁定状态
     reset_target()
@@ -63,96 +64,75 @@ def process_video(video_path, output_dir, model, args):
     
     # 获取视频信息
     video_name = os.path.splitext(os.path.basename(video_path))[0]
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frames = []
     frame_count = 0
-    max_frames = 3  # 只处理前三帧
+    batch_size = 3  # 每次处理3帧
     
-    # 读取前三帧
-    while frame_count < max_frames:
-        ret, frame = cap.read()
-        if not ret:
+    while frame_count < total_frames:
+        # 读取一批帧
+        batch_frames = []
+        for _ in range(batch_size):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            batch_frames.append(frame)
+            frame_count += 1
+        
+        if not batch_frames:
             break
-        frames.append(frame)
-        frame_count += 1
-    
-    cap.release()
-    
-    if not frames:
-        return {
-            'status': 'error',
-            'message': '视频没有可读取的帧',
-            'frame_count': 0,
-            'area': None,
-            'lock_info': None
-        }
-    
-    # 使用YOLO11进行人体检测，禁用所有输出
-    try:
-        with suppress_stdout():
-            bboxs_batch, scores_batch = yolo_human_det(frames, model, reso=args.det_dim, confidence=args.confidence, quiet=True)
-    except Exception as e:
-        return {
-            'status': 'error',
-            'message': f'检测过程出错: {str(e)}',
-            'frame_count': frame_count,
-            'area': None,
-            'lock_info': None
-        }
-    
-    # 检查是否成功锁定目标
-    if all(bbox is None for bbox in bboxs_batch):
-        return {
-            'status': 'warning',
-            'message': '未检测到任何人体',
-            'frame_count': frame_count,
-            'area': None,
-            'lock_info': None
-        }
-    
-    # 获取锁定的目标框
-    locked_frame_idx = None
-    locked_bbox = None
-    max_area = 0
-    
-    for i, bboxs in enumerate(bboxs_batch):
-        if bboxs is not None:
-            # 计算检测框面积
-            x1, y1, x2, y2 = bboxs[0]  # 取第一个检测框
-            area = (x2 - x1) * (y2 - y1)
             
-            if area > max_area:
-                max_area = area
-                locked_frame_idx = i
-                locked_bbox = bboxs[0]
+        # 使用YOLO11进行人体检测
+        try:
+            with suppress_stdout():
+                bboxs_batch, scores_batch = yolo_human_det(batch_frames, model, reso=args.det_dim, confidence=args.confidence, quiet=True)
+        except Exception as e:
+            cap.release()
+            return {
+                'status': 'error',
+                'message': f'检测过程出错: {str(e)}',
+                'frame_count': frame_count,
+                'area': None,
+                'lock_info': None
+            }
+        
+        # 检查是否检测到人体
+        for i, bboxs in enumerate(bboxs_batch):
+            if bboxs is not None:
+                # 计算检测框面积
+                x1, y1, x2, y2 = bboxs[0]  # 取第一个检测框
+                area = (x2 - x1) * (y2 - y1)
+                
+                # 计算实际的帧号
+                actual_frame_idx = frame_count - len(batch_frames) + i
+                
+                # 在检测到的帧上绘制检测框
+                result_frame = batch_frames[i].copy()
+                area_text = f'Frame: {actual_frame_idx}, Area: {area:.0f}px²'
+                result_frame = draw_bbox(result_frame, bboxs[0], text=area_text)
+                
+                # 保存结果图片
+                output_path = os.path.join(output_dir, f'{video_name}_detection_frame_{actual_frame_idx}.jpg')
+                cv2.imwrite(output_path, result_frame)
+                
+                cap.release()
+                return {
+                    'status': 'success',
+                    'message': '成功锁定目标',
+                    'frame_count': actual_frame_idx,
+                    'area': area,
+                    'frame_idx': actual_frame_idx,
+                    'lock_info': f'已锁定目标! 帧号: {actual_frame_idx}, 面积: {area:.2f}'
+                }
     
-    if locked_bbox is None:
-        return {
-            'status': 'warning',
-            'message': '未能锁定目标',
-            'frame_count': frame_count,
-            'area': None,
-            'lock_info': None
-        }
-    
-    # 在锁定帧上绘制检测框
-    result_frame = frames[locked_frame_idx].copy()
-    area_text = f'Area: {max_area:.0f}px²'
-    result_frame = draw_bbox(result_frame, locked_bbox, text=area_text)
-    
-    # 保存结果图片
-    output_path = os.path.join(output_dir, f'{video_name}_detection.jpg')
-    cv2.imwrite(output_path, result_frame)
-    
-    # 生成锁定信息
-    lock_info = f'已锁定目标! 帧: {locked_frame_idx + 1}, 面积: {max_area:.2f}'
-    
+    # 如果遍历完所有帧都没有检测到人体
+    cap.release()
     return {
-        'status': 'success',
-        'message': '成功锁定目标',
+        'status': 'warning',
+        'message': '未检测到任何人体',
         'frame_count': frame_count,
-        'area': max_area,
-        'frame_idx': locked_frame_idx,
-        'lock_info': lock_info
+        'area': None,
+        'lock_info': None
     }
 
 def batch_process_videos(video_dir, output_dir):

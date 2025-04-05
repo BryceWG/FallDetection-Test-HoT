@@ -141,7 +141,7 @@ def get_pose2D(video_path, output_dir, save_json=False, detector='yolo11', batch
         # 使用更高的检测分辨率(832x832)和新的HRNet配置
         keypoints, scores = hrnet_pose(video_path, det_dim=832, num_peroson=1, gen_output=True, 
                                      detector=detector, batch_size=batch_size,
-                                     hrnet_cfg='demo/lib/hrnet/experiments/w48_512x384_adam_lr1e-3.yaml')
+                                     hrnet_cfg='demo/lib/hrnet/experiments/w48_384x288_adam_lr1e-3.yaml')
     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
     re_kpts = revise_kpts(keypoints, scores, valid_frames)
 
