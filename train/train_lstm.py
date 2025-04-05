@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
+import optuna
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
@@ -965,7 +966,10 @@ def process_args():
     parser.add_argument('--rotation_angles', type=str, default='45-135,135-225,225-315',
                        help='旋转角度范围,格式为min1-max1,min2-max2,min3-max3')
     
-    # 只在这里进行一次完整的参数解析
+    # Optuna相关参数
+    parser.add_argument('--optuna_trials', type=int, default=0, 
+                       help='Optuna优化的试验次数,大于0则启用优化')
+    
     args = parser.parse_args()
     
     # 如果用户没有提供 save_dir，则在解析后生成默认值
@@ -1295,6 +1299,284 @@ def plot_cv_metrics(fold_metrics, avg_metrics, save_dir):
     plt.savefig(os.path.join(save_dir, 'cv_metrics.png'))
     plt.close()
 
+def objective(trial, args, full_dataset, device):
+    """
+    Optuna优化的目标函数
+    """
+    # 从trial中采样超参数
+    args.hidden_dim = trial.suggest_categorical('hidden_dim', [64, 128, 192, 256])
+    args.num_layers = trial.suggest_int('num_layers', 1, 3)
+    args.dropout = trial.suggest_float('dropout', 0.1, 0.6)
+    args.batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+    
+    print(f"\n试验 {trial.number + 1} - 参数配置:")
+    print(f"hidden_dim: {args.hidden_dim}")
+    print(f"num_layers: {args.num_layers}")
+    print(f"dropout: {args.dropout:.4f}")
+    print(f"batch_size: {args.batch_size}")
+    
+    # 划分数据集
+    train_indices, test_indices = train_test_split(
+        range(len(full_dataset)),
+        test_size=args.test_ratio,
+        stratify=full_dataset._raw_labels,
+        random_state=args.seed
+    )
+    
+    train_indices, val_indices = train_test_split(
+        train_indices,
+        test_size=args.val_ratio,
+        stratify=[full_dataset._raw_labels[i] for i in train_indices],
+        random_state=args.seed
+    )
+    
+    # 先使用原始数据集计算标准化参数
+    full_dataset.fit_scaler(train_indices)
+    
+    # 创建训练集
+    if args.data_enhance:
+        print("\n对训练集进行数据增强...")
+        # 创建一个新的数据集实例用于训练
+        train_dataset = PoseSequenceDataset(
+            data_dir=args.data_dir,
+            label_file=args.label_file,
+            pose_type=args.pose_type,
+            normal_seq_length=args.normal_seq_length,
+            normal_stride=args.normal_stride,
+            fall_seq_length=args.fall_seq_length,
+            fall_stride=args.fall_stride,
+            overlap_threshold=args.overlap_threshold,
+            pure_fall=args.pure_fall
+        )
+        # 设置标准化参数
+        train_dataset.global_mean = full_dataset.global_mean
+        train_dataset.global_std = full_dataset.global_std
+        # 只保留训练集的样本
+        train_dataset.samples = [train_dataset.samples[i] for i in train_indices]
+        train_dataset._raw_labels = [train_dataset._raw_labels[i] for i in train_indices]
+        # 对训练集进行数据增强
+        train_dataset.enhance_data(args.rotation_angles)
+    else:
+        train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
+    
+    # 创建验证集
+    val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
+    
+    print("\n创建数据加载器...")
+    # 创建数据加载器
+    if args.balance_strategy != 'none':
+        if args.data_enhance:
+            train_labels = [sample['label'] for sample in train_dataset.samples]
+        else:
+            train_labels = [train_dataset[i]['label'].item() for i in range(len(train_dataset))]
+        
+        label_counts = Counter(train_labels)
+        
+        if args.target_ratio != 1.0:
+            max_count = max(label_counts.values())
+            target_counts = {
+                0: int(max_count),
+                1: int(max_count * args.target_ratio)
+            }
+        else:
+            target_counts = 'auto'
+            
+        train_loader = create_balanced_loader(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            strategy=args.balance_strategy,
+            sampling_strategy=target_counts,
+            shuffle=True,
+            num_workers=4
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=4
+        )
+    
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    
+    # 创建模型
+    input_dim = full_dataset._feature_dim
+    model = FallDetectionLSTM(
+        input_dim=input_dim,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        bidirectional=args.lstm_bi
+    ).to(device)
+    
+    # 定义损失函数和优化器
+    criterion = FocalLoss(alpha=0.25, gamma=2.0)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
+    
+    # 训练模型
+    best_val_loss = float('inf')
+    early_stopping = EarlyStopping(patience=5, verbose=False)
+    
+    print("\n开始训练...")
+    for epoch in range(args.num_epochs):
+        # 训练阶段
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        
+        train_pbar = tqdm(train_loader, desc=f"Trial {trial.number + 1} Epoch {epoch+1}/{args.num_epochs} [Train]",
+                         leave=False)
+        for batch in train_pbar:
+            sequences = batch['sequence'].to(device)
+            labels = batch['label'].to(device)
+            
+            outputs = model(sequences)
+            loss = criterion(outputs, labels)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item() * sequences.size(0)
+            pred = (outputs >= 0.5).float()
+            train_correct += (pred == labels).sum().item()
+            train_total += labels.size(0)
+            
+            # 更新进度条
+            train_pbar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                'acc': f"{train_correct/train_total:.4f}"
+            })
+        
+        train_loss = train_loss / len(train_loader.dataset)
+        train_acc = train_correct / train_total
+        
+        # 验证阶段
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            val_pbar = tqdm(val_loader, desc=f"Trial {trial.number + 1} Epoch {epoch+1}/{args.num_epochs} [Val]",
+                          leave=False)
+            for batch in val_pbar:
+                sequences = batch['sequence'].to(device)
+                labels = batch['label'].to(device)
+                
+                outputs = model(sequences)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item() * sequences.size(0)
+                pred = (outputs >= 0.5).float()
+                val_correct += (pred == labels).sum().item()
+                val_total += labels.size(0)
+                
+                # 更新进度条
+                val_pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'acc': f"{val_correct/val_total:.4f}"
+                })
+        
+        val_loss = val_loss / len(val_loader.dataset)
+        val_acc = val_correct / val_total
+        
+        # 打印每个epoch的结果
+        print(f"Trial {trial.number + 1} Epoch {epoch+1}/{args.num_epochs} - "
+              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        
+        # 更新学习率
+        scheduler.step(val_loss)
+        
+        # 早停检查
+        early_stopping(val_loss, model)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+        
+        if early_stopping.early_stop:
+            print(f"Trial {trial.number + 1} 早停触发于 epoch {epoch+1}")
+            break
+        
+        # 报告中间值
+        trial.report(val_loss, epoch)
+        
+        # 处理pruning
+        if trial.should_prune():
+            print(f"Trial {trial.number + 1} 被剪枝于 epoch {epoch+1}")
+            raise optuna.TrialPruned()
+    
+    return best_val_loss
+
+def run_optuna_optimization(args, full_dataset, device):
+    """
+    运行Optuna超参数优化
+    
+    Args:
+        args: 命令行参数
+        full_dataset: 完整数据集
+        device: 训练设备
+    """
+    print("\n开始Optuna超参数优化...")
+    
+    # 创建study(移除了study_name和storage参数)
+    study = optuna.create_study(
+        direction="minimize",
+        pruner=optuna.pruners.MedianPruner()
+    )
+    
+    # 运行优化
+    study.optimize(
+        lambda trial: objective(trial, args, full_dataset, device),
+        n_trials=args.optuna_trials,
+        timeout=None
+    )
+    
+    # 打印优化结果
+    print("\n优化完成!")
+    print("\n最佳超参数:")
+    print(f"hidden_dim: {study.best_params['hidden_dim']}")
+    print(f"num_layers: {study.best_params['num_layers']}")
+    print(f"dropout: {study.best_params['dropout']:.4f}")
+    print(f"batch_size: {study.best_params['batch_size']}")
+    print(f"\n最佳验证损失: {study.best_value:.4f}")
+    
+    # 保存优化结果
+    results_dir = os.path.join(args.save_dir, 'optuna_results')
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 保存study统计信息
+    study_stats = {
+        'best_params': study.best_params,
+        'best_value': study.best_value,
+        'best_trial': study.best_trial.number,
+        'n_trials': len(study.trials),
+        'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    with open(os.path.join(results_dir, 'optuna_results.json'), 'w', encoding='utf-8') as f:
+        json.dump(study_stats, f, indent=4, ensure_ascii=False)
+    
+    # 绘制优化可视化图
+    try:
+        # 绘制优化历史
+        optimization_history_plot = optuna.visualization.plot_optimization_history(study)
+        optimization_history_plot.write_image(os.path.join(results_dir, 'optimization_history.png'))
+        
+        # 绘制参数重要性
+        param_importance_plot = optuna.visualization.plot_param_importances(study)
+        param_importance_plot.write_image(os.path.join(results_dir, 'param_importance.png'))
+        
+        # 绘制参数关系图
+        parallel_coordinate_plot = optuna.visualization.plot_parallel_coordinate(study)
+        parallel_coordinate_plot.write_image(os.path.join(results_dir, 'parallel_coordinate.png'))
+    except Exception as e:
+        print(f"警告: 无法生成可视化图表: {e}")
+    
+    return study.best_params
+
 def main():
     args = process_args()
     # 在解析参数后，重新构建默认的 save_dir，因为默认值是在解析前基于初步的 args 创建的
@@ -1329,6 +1611,23 @@ def main():
     )
     
     print(f"数据集大小: {len(full_dataset)}")
+    
+    # 检查是否使用Optuna进行超参数优化
+    if args.optuna_trials > 0:
+        if args.n_splits > 0:
+            print("警告: Optuna优化模式下不支持交叉验证,将忽略n_splits参数")
+            args.n_splits = 0
+        
+        # 运行Optuna优化
+        best_params = run_optuna_optimization(args, full_dataset, device)
+        
+        # 使用最佳参数更新args
+        args.hidden_dim = best_params['hidden_dim']
+        args.num_layers = best_params['num_layers']
+        args.dropout = best_params['dropout']
+        args.batch_size = best_params['batch_size']
+        
+        print("\n使用最佳超参数进行最终训练...")
     
     # 检查是否执行交叉验证
     if args.n_splits > 0:
