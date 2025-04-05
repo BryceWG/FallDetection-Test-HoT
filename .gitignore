@@ -19,7 +19,7 @@
 .github
 *.pkl
 *.csv
-
+*.md
 # windsurf rules
 .windsurfrules
 

@@ -200,17 +200,6 @@ class FocalLoss(nn.Module):
         loss = weight * ce
         return loss.mean()
 
-class LabelSmoothingBCELoss(nn.Module):
-    """带标签平滑的二分类交叉熵损失"""
-    def __init__(self, smoothing=0.1):
-        super().__init__()
-        self.smoothing = smoothing
-        
-    def forward(self, pred, target):
-        # 将目标值从 [0, 1] 平滑到 [smoothing, 1-smoothing]
-        smooth_target = target * (1 - self.smoothing) + 0.5 * self.smoothing
-        return nn.functional.binary_cross_entropy(pred, smooth_target)
-
 class PoseSequenceDataset(Dataset):
     """姿态序列数据集
     加载3D或2D姿态数据和对应的标签
@@ -932,7 +921,7 @@ def process_args():
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
-    parser.add_argument('--fall_stride', type=int, default=5, help='跌倒视频滑动步长')
+    parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
     
     # 数据集划分参数
     parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
