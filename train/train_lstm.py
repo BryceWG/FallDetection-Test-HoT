@@ -24,6 +24,68 @@ from data_balancer import create_balanced_loader
 
 sys.path.append(os.getcwd())
 
+def rotation_matrix_y(angle_degrees):
+    """生成绕Y轴旋转的旋转矩阵
+    
+    Args:
+        angle_degrees: 旋转角度(度)
+        
+    Returns:
+        3x3旋转矩阵
+    """
+    angle_rad = np.radians(angle_degrees)
+    cos_theta = np.cos(angle_rad)
+    sin_theta = np.sin(angle_rad)
+    
+    R = np.array([
+        [cos_theta, 0, sin_theta],
+        [0, 1, 0],
+        [-sin_theta, 0, cos_theta]
+    ])
+    return R
+
+def rotate_pose3d(pose_data, angle_degrees):
+    """旋转3D姿态数据
+    
+    Args:
+        pose_data: 形状为[frames, joints, 3]的姿态数据
+        angle_degrees: 旋转角度(度)
+        
+    Returns:
+        旋转后的姿态数据,形状与输入相同
+    """
+    # 创建旋转矩阵
+    R = rotation_matrix_y(angle_degrees)
+    
+    # 获取形状信息
+    n_frames, n_joints, _ = pose_data.shape
+    
+    # 重塑数据以便批量旋转
+    points = pose_data.reshape(-1, 3)
+    
+    # 应用旋转
+    rotated_points = np.dot(points, R.T)
+    
+    # 恢复原始形状
+    rotated_pose = rotated_points.reshape(n_frames, n_joints, 3)
+    
+    return rotated_pose
+
+def parse_angle_ranges(angle_str):
+    """解析角度范围字符串
+    
+    Args:
+        angle_str: 格式为'min1-max1,min2-max2,min3-max3'的字符串
+        
+    Returns:
+        包含(min,max)元组的列表
+    """
+    ranges = []
+    for range_str in angle_str.split(','):
+        min_angle, max_angle = map(float, range_str.split('-'))
+        ranges.append((min_angle, max_angle))
+    return ranges
+
 class EarlyStopping:
 
     def __init__(self, patience=10, min_delta=0, verbose=True):
@@ -322,96 +384,9 @@ class PoseSequenceDataset(Dataset):
                 
             total_frames = len(pose_data)
             
-            if has_fall == 0 or not self.pure_fall:
-                # 非跌倒视频或非pure_fall模式：使用normal_stride
-                if has_fall == 1:
-                    # 跌倒视频但非pure_fall模式：使用fall_stride和重叠阈值
-                    fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
-                    fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
-                    stride = self.fall_stride
-                    seq_length = self.fall_seq_length
-                else:
-                    # 非跌倒视频：使用normal_stride
-                    stride = self.normal_stride
-                    seq_length = self.normal_seq_length
-                
-                for start_idx in range(0, total_frames - seq_length + 1, stride):
-                    end_idx = start_idx + seq_length
-                    if end_idx > total_frames:
-                        break
-                    
-                    if has_fall == 1:
-                        # 计算当前序列与跌倒片段的重叠长度
-                        overlap_start = max(start_idx, fall_start)
-                        overlap_end = min(end_idx, fall_end)
-                        overlap_length = max(0, overlap_end - overlap_start)
-                        
-                        # 计算重叠比例
-                        overlap_ratio = overlap_length / seq_length
-                        
-                        # 根据重叠比例判断标签
-                        label = 1 if overlap_ratio >= self.overlap_threshold else 0
-                        
-                        self.samples.append({
-                            'video_id': video_id,
-                            'label': label,
-                            'start_idx': start_idx,
-                            'end_idx': end_idx,
-                            'overlap_ratio': overlap_ratio
-                        })
-                    else:
-                        self.samples.append({
-                            'video_id': video_id,
-                            'label': has_fall,
-                            'start_idx': start_idx,
-                            'end_idx': end_idx
-                        })
-            else:
-                # pure_fall模式下的跌倒视频处理
-                fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
-                fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
-                
-                # 1. 添加跌倒前的非跌倒序列
-                if fall_start > self.normal_seq_length:
-                    for start_idx in range(0, fall_start - self.normal_seq_length + 1, 
-                                         self.normal_stride):
-                        end_idx = start_idx + self.normal_seq_length
-                        if end_idx > fall_start:
-                            break
-                            
-                        self.samples.append({
-                            'video_id': video_id,
-                            'label': 0,
-                            'start_idx': start_idx,
-                            'end_idx': end_idx
-                        })
-                
-                # 2. 添加完整的跌倒序列
-                fall_length = fall_end - fall_start
-                if fall_length >= self.fall_seq_length:
-                    # 如果跌倒片段长度足够，使用滑动窗口
-                    for start_idx in range(fall_start, fall_end - self.fall_seq_length + 1,
-                                         self.fall_stride):
-                        end_idx = start_idx + self.fall_seq_length
-                        if end_idx > fall_end:
-                            break
-                            
-                        self.samples.append({
-                            'video_id': video_id,
-                            'label': 1,
-                            'start_idx': start_idx,
-                            'end_idx': end_idx,
-                            'overlap_ratio': 1.0  # 纯跌倒片段
-                        })
-                else:
-                    # 如果跌倒片段不够长，将整个片段作为一个样本
-                    self.samples.append({
-                        'video_id': video_id,
-                        'label': 1,
-                        'start_idx': fall_start,
-                        'end_idx': fall_end,
-                        'overlap_ratio': 1.0
-                    })
+            # 使用原始数据创建序列
+            self._add_sequences_from_pose(pose_data, video_id, has_fall, row, total_frames, 
+                                        stats, is_augmented=False)
         
         # 打印数据集统计信息
         total_samples = len(self.samples)
@@ -456,33 +431,130 @@ class PoseSequenceDataset(Dataset):
         print(f"非跌倒样本数: {non_fall_samples}")
         if total_samples > 0:
             print(f"跌倒/非跌倒比例: {fall_samples/non_fall_samples:.2f}")
-            
-        # 如果没有样本，给出更明确的警告
-        if total_samples == 0:
-            print(f"\n警告：未找到任何有效的{self.pose_type}姿态数据样本！")
-            print(f"请检查:")
-            print(f"1. 数据目录 {self.data_dir} 是否包含视频子目录")
-            print(f"2. 视频子目录中是否包含 {'input_2D/input_keypoints_2d.npz' if self.pose_type == '2d' else 'output_3D/output_keypoints_3d.npz'} 文件")
-            print(f"3. 标签文件中的视频ID是否与数据目录中的子目录名称匹配")
     
+    def _add_sequences_from_pose(self, pose_data, video_id, has_fall, row, total_frames, stats, is_augmented=False):
+        """从姿态数据创建序列样本
+        
+        Args:
+            pose_data: 姿态数据
+            video_id: 视频ID
+            has_fall: 是否为跌倒视频
+            row: 标签数据行
+            total_frames: 总帧数
+            stats: 统计信息字典
+            is_augmented: 是否为增强数据
+        """
+        if has_fall == 0 or not self.pure_fall:
+            # 非跌倒视频或非pure_fall模式：使用normal_stride
+            if has_fall == 1:
+                # 跌倒视频但非pure_fall模式：使用fall_stride和重叠阈值
+                fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
+                fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
+                stride = self.fall_stride
+                seq_length = self.fall_seq_length
+            else:
+                # 非跌倒视频：使用normal_stride
+                stride = self.normal_stride
+                seq_length = self.normal_seq_length
+            
+            for start_idx in range(0, total_frames - seq_length + 1, stride):
+                end_idx = start_idx + seq_length
+                if end_idx > total_frames:
+                    break
+                
+                if has_fall == 1:
+                    # 计算当前序列与跌倒片段的重叠长度
+                    overlap_start = max(start_idx, fall_start)
+                    overlap_end = min(end_idx, fall_end)
+                    overlap_length = max(0, overlap_end - overlap_start)
+                    
+                    # 计算重叠比例
+                    overlap_ratio = overlap_length / seq_length
+                    
+                    # 根据重叠比例判断标签
+                    label = 1 if overlap_ratio >= self.overlap_threshold else 0
+                    
+                    self.samples.append({
+                        'video_id': video_id,
+                        'label': label,
+                        'start_idx': start_idx,
+                        'end_idx': end_idx,
+                        'overlap_ratio': overlap_ratio,
+                        'pose_data': pose_data if is_augmented else None
+                    })
+                else:
+                    self.samples.append({
+                        'video_id': video_id,
+                        'label': has_fall,
+                        'start_idx': start_idx,
+                        'end_idx': end_idx,
+                        'pose_data': pose_data if is_augmented else None
+                    })
+        else:
+            # pure_fall模式下的跌倒视频处理
+            fall_start = int(row['fall_start_frame']) if not pd.isna(row['fall_start_frame']) else 0
+            fall_end = int(row['fall_end_frame']) if not pd.isna(row['fall_end_frame']) else total_frames
+            
+            # 1. 添加跌倒前的非跌倒序列
+            if fall_start > self.normal_seq_length:
+                for start_idx in range(0, fall_start - self.normal_seq_length + 1, 
+                                     self.normal_stride):
+                    end_idx = start_idx + self.normal_seq_length
+                    if end_idx > fall_start:
+                        break
+                        
+                    self.samples.append({
+                        'video_id': video_id,
+                        'label': 0,
+                        'start_idx': start_idx,
+                        'end_idx': end_idx,
+                        'pose_data': pose_data if is_augmented else None
+                    })
+            
+            # 2. 添加完整的跌倒序列
+            fall_length = fall_end - fall_start
+            if fall_length >= self.fall_seq_length:
+                # 如果跌倒片段长度足够，使用滑动窗口
+                for start_idx in range(fall_start, fall_end - self.fall_seq_length + 1,
+                                     self.fall_stride):
+                    end_idx = start_idx + self.fall_seq_length
+                    if end_idx > fall_end:
+                        break
+                        
+                    self.samples.append({
+                        'video_id': video_id,
+                        'label': 1,
+                        'start_idx': start_idx,
+                        'end_idx': end_idx,
+                        'overlap_ratio': 1.0,  # 纯跌倒片段
+                        'pose_data': pose_data if is_augmented else None
+                    })
+            else:
+                # 如果跌倒片段不够长，将整个片段作为一个样本
+                self.samples.append({
+                    'video_id': video_id,
+                    'label': 1,
+                    'start_idx': fall_start,
+                    'end_idx': fall_end,
+                    'overlap_ratio': 1.0,
+                    'pose_data': pose_data if is_augmented else None
+                })
+
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        # 加载姿态数据 (使用self.pose_type)
-        pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
-        
-        if pose_data is None:
-             # 处理数据加载失败的情况，例如返回一个空字典或抛出异常
-             # 这里我们返回一个包含标识符的字典，让DataLoader的collate_fn处理或跳过
-             print(f"警告: 无法加载样本 {idx} 的数据 (video_id: {sample['video_id']})")
-             # 返回一个可以被 collate_fn 识别并过滤掉的特殊值，或者你需要修改 collate_fn
-             # 或者，更简单的方式是在 _create_sequence_samples 中就跳过无法加载的视频
-             # 为保持简单，我们先假设 _create_sequence_samples 已过滤掉无法加载的视频
-             # 如果仍然出现 None，这里应该抛出更明确的错误
-             raise RuntimeError(f"无法加载样本 {idx} (video_id: {sample['video_id']}) 的姿态数据")
+        # 如果是增强数据,直接使用保存的姿态数据
+        if sample.get('pose_data') is not None:
+            pose_data = sample['pose_data']
+        else:
+            # 否则从文件加载姿态数据
+            pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
+            
+            if pose_data is None:
+                 raise RuntimeError(f"无法加载样本 {idx} (video_id: {sample['video_id']}) 的姿态数据")
 
         # 截取指定范围的序列
         start_idx = sample['start_idx']
@@ -532,6 +604,56 @@ class PoseSequenceDataset(Dataset):
             'start_idx': start_idx,
             'end_idx': end_idx
         }
+
+    def enhance_data(self, rotation_angles):
+        """对数据集进行旋转增强
+        
+        Args:
+            rotation_angles: 格式为'min1-max1,min2-max2,min3-max3'的旋转角度范围字符串
+            
+        注意: 此方法应在划分训练集后调用,且只对训练集调用
+        """
+        if self.pose_type != '3d':
+            print("警告: 只能对3D姿态数据进行旋转增强")
+            return
+            
+        # 解析旋转角度范围
+        angle_ranges = parse_angle_ranges(rotation_angles)
+        print(f"\n开始数据增强...")
+        print(f"旋转角度范围: {angle_ranges}")
+        
+        # 保存原始样本
+        original_samples = self.samples.copy()
+        enhanced_samples = []
+        
+        # 对每个样本进行增强
+        for sample in tqdm(original_samples, desc="数据增强"):
+            # 加载原始姿态数据
+            pose_data = self._load_pose_data(sample['video_id'], sample['label'] == 1)
+            if pose_data is None:
+                continue
+                
+            # 对每个角度范围生成一个增强样本
+            for min_angle, max_angle in angle_ranges:
+                # 随机选择旋转角度
+                angle = np.random.uniform(min_angle, max_angle)
+                rotated_pose = rotate_pose3d(pose_data, angle)
+                
+                # 创建增强样本
+                enhanced_sample = sample.copy()
+                enhanced_sample['pose_data'] = rotated_pose
+                enhanced_samples.append(enhanced_sample)
+        
+        # 将增强样本添加到数据集
+        self.samples.extend(enhanced_samples)
+        
+        # 更新原始标签缓存
+        self._raw_labels = [sample['label'] for sample in self.samples]
+        
+        print(f"数据增强完成:")
+        print(f"原始样本数: {len(original_samples)}")
+        print(f"增强后样本数: {len(self.samples)}")
+        print(f"增强倍数: {len(self.samples)/len(original_samples):.2f}")
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, scheduler=None, save_dir='./checkpoints/fall_detection'):
     """
@@ -810,7 +932,7 @@ def process_args():
     
     # 跌倒视频的序列参数
     parser.add_argument('--fall_seq_length', type=int, default=30, help='跌倒视频序列长度')
-    parser.add_argument('--fall_stride', type=int, default=10, help='跌倒视频滑动步长')
+    parser.add_argument('--fall_stride', type=int, default=5, help='跌倒视频滑动步长')
     
     # 数据集划分参数
     parser.add_argument('--test_ratio', type=float, default=0.25, help='测试集占总数据的比例')
@@ -847,6 +969,12 @@ def process_args():
                        help='跌倒判定的重叠比例阈值(0-1之间),仅对跌倒视频有效')
     parser.add_argument('--pure_fall', action='store_true',
                        help='启用纯跌倒模式,从标签文件中读取跌倒片段起始帧')
+    
+    # 数据增强参数
+    parser.add_argument('--data_enhance', action='store_true',
+                       help='是否启用3D姿态数据增强')
+    parser.add_argument('--rotation_angles', type=str, default='45-135,135-225,225-315',
+                       help='旋转角度范围,格式为min1-max1,min2-max2,min3-max3')
     
     # 只在这里进行一次完整的参数解析
     args = parser.parse_args()
@@ -950,13 +1078,39 @@ def run_cross_validation(full_dataset, args, device):
             random_state=args.seed
         )
         
-        # 使用训练集数据计算标准化参数
-        full_dataset.fit_scaler(train_idx)
-        
-        # 创建数据子集
+        # 创建训练集、验证集和测试集
         train_dataset = torch.utils.data.Subset(full_dataset, train_idx)
         val_dataset = torch.utils.data.Subset(full_dataset, val_idx)
         test_dataset = torch.utils.data.Subset(full_dataset, test_idx)
+        
+        # 使用训练集数据计算标准化参数
+        full_dataset.fit_scaler(train_idx)
+        
+        # 只对训练集进行数据增强
+        if args.data_enhance:
+            print("\n对训练集进行数据增强...")
+            # 创建一个新的数据集实例用于训练
+            train_dataset_with_enhance = PoseSequenceDataset(
+                data_dir=args.data_dir,
+                label_file=args.label_file,
+                pose_type=args.pose_type,
+                normal_seq_length=args.normal_seq_length,
+                normal_stride=args.normal_stride,
+                fall_seq_length=args.fall_seq_length,
+                fall_stride=args.fall_stride,
+                overlap_threshold=args.overlap_threshold,
+                pure_fall=args.pure_fall
+            )
+            # 只保留训练集的样本
+            train_dataset_with_enhance.samples = [train_dataset_with_enhance.samples[i] for i in train_idx]
+            train_dataset_with_enhance._raw_labels = [train_dataset_with_enhance._raw_labels[i] for i in train_idx]
+            # 对训练集进行数据增强
+            train_dataset_with_enhance.enhance_data(args.rotation_angles)
+            # 设置标准化参数
+            train_dataset_with_enhance.global_mean = full_dataset.global_mean
+            train_dataset_with_enhance.global_std = full_dataset.global_std
+            # 使用增强后的数据集替换原训练集
+            train_dataset = train_dataset_with_enhance
         
         print(f"训练集大小: {len(train_dataset)}")
         print(f"验证集大小: {len(val_dataset)}")
@@ -1153,7 +1307,6 @@ def plot_cv_metrics(fold_metrics, avg_metrics, save_dir):
     plt.close()
 
 def main():
-
     args = process_args()
     # 在解析参数后，重新构建默认的 save_dir，因为默认值是在解析前基于初步的 args 创建的
     if args.save_dir == f'./checkpoint/fall_detection_lstm_{args.pose_type}/{datetime.now().strftime("%Y-%m-%d-%H%M")}': # 检查是否是未替换 pose_type 的默认路径
@@ -1173,21 +1326,6 @@ def main():
     print(f"使用设备: {device}")
     
     # 创建数据集
-    if os.path.exists(args.label_file):
-        print(f"加载标签文件: {args.label_file}")
-    else:
-        print(f"错误: 标签文件不存在 - {args.label_file}")
-        return
-    
-    # 检查数据目录
-    if not os.path.exists(args.data_dir):
-        print(f"错误: 数据目录不存在 - {args.data_dir}")
-        return
-    
-    # 创建保存目录
-    os.makedirs(args.save_dir, exist_ok=True)
-    
-    # 创建数据集和加载器
     print("创建数据集...")
     full_dataset = PoseSequenceDataset(
         data_dir=args.data_dir,
@@ -1226,12 +1364,39 @@ def main():
         random_state=args.seed
     )
     
-    # 使用训练集数据计算标准化参数
-    full_dataset.fit_scaler(train_indices)
-    
+    # 创建训练集、验证集和测试集
     train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
     val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
     test_dataset = torch.utils.data.Subset(full_dataset, test_indices)
+    
+    # 使用训练集数据计算标准化参数
+    full_dataset.fit_scaler(train_indices)
+    
+    # 只对训练集进行数据增强
+    if args.data_enhance:
+        print("\n对训练集进行数据增强...")
+        # 创建一个新的数据集实例用于训练
+        train_dataset_with_enhance = PoseSequenceDataset(
+            data_dir=args.data_dir,
+            label_file=args.label_file,
+            pose_type=args.pose_type,
+            normal_seq_length=args.normal_seq_length,
+            normal_stride=args.normal_stride,
+            fall_seq_length=args.fall_seq_length,
+            fall_stride=args.fall_stride,
+            overlap_threshold=args.overlap_threshold,
+            pure_fall=args.pure_fall
+        )
+        # 只保留训练集的样本
+        train_dataset_with_enhance.samples = [train_dataset_with_enhance.samples[i] for i in train_indices]
+        train_dataset_with_enhance._raw_labels = [train_dataset_with_enhance._raw_labels[i] for i in train_indices]
+        # 对训练集进行数据增强
+        train_dataset_with_enhance.enhance_data(args.rotation_angles)
+        # 设置标准化参数
+        train_dataset_with_enhance.global_mean = full_dataset.global_mean
+        train_dataset_with_enhance.global_std = full_dataset.global_std
+        # 使用增强后的数据集替换原训练集
+        train_dataset = train_dataset_with_enhance
     
     print(f"训练集大小: {len(train_dataset)}")
     print(f"验证集大小: {len(val_dataset)}")
