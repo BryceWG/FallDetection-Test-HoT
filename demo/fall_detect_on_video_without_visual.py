@@ -297,16 +297,21 @@ class FallDetectionOnVideo:
         """处理视频并进行跌倒检测"""
         start_time = time.time()
         
-        # 1. 生成2D姿态
-        print(f"⏳ 从视频生成2D姿态...")
-        keypoints = get_pose2D(self.args.video, self.output_dir, 
-                              detector=self.args.detector, 
-                              batch_size=self.args.batch_size)
-        
-        # 2. 生成3D姿态
-        print(f"⏳ 从2D姿态预测3D姿态...")
-        output_3d_data = get_pose3D(self.args.video, self.output_dir, self.args.fix_z)
+        # 检查3D姿态文件是否已存在
         output_3d_file = os.path.join(self.output_dir, 'output_3D', 'output_keypoints_3d.npz')
+        if os.path.exists(output_3d_file):
+            print(f"发现已存在的3D姿态文件: {output_3d_file}")
+            print("跳过姿态提取步骤...")
+        else:
+            # 1. 生成2D姿态
+            print(f"⏳ 从视频生成2D姿态...")
+            keypoints = get_pose2D(self.args.video, self.output_dir, 
+                                  detector=self.args.detector, 
+                                  batch_size=self.args.batch_size)
+            
+            # 2. 生成3D姿态
+            print(f"⏳ 从2D姿态预测3D姿态...")
+            output_3d_data = get_pose3D(self.args.video, self.output_dir, self.args.fix_z)
         
         # 3. 进行跌倒检测
         if self.evaluator:
@@ -347,11 +352,11 @@ def plot_confusion_matrix(y_true, y_pred, output_dir):
     # 创建图形
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['正常', '跌倒'],
-                yticklabels=['正常', '跌倒'])
-    plt.title('混淆矩阵')
-    plt.xlabel('预测标签')
-    plt.ylabel('真实标签')
+                xticklabels=['Normal', 'Fall'],
+                yticklabels=['Normal', 'Fall'])
+    plt.title('Confusion Matrix')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
     
     # 保存图形
     output_file = os.path.join(output_dir, 'confusion_matrix.png')
@@ -466,7 +471,8 @@ def main():
         
         result_info = {
             'video_name': video_name,
-            'processing_time': f"{int(minutes)}分{seconds:.1f}秒"
+            'processing_time': f"{int(minutes)}分{seconds:.1f}秒",
+            'processing_time_seconds': video_total_time  # 添加处理时间（秒）
         }
         
         if detector.evaluator:
@@ -474,7 +480,10 @@ def main():
             pred, prob, segment_results = detector.evaluator.evaluate(output_3d_file, reverse=args.reverse)
             result = "跌倒" if pred == 1 else "正常"
             result_info['prediction'] = result
+            result_info['prediction_value'] = int(pred)  # 添加数值预测结果
             result_info['fall_probability'] = f"{prob:.4f}"
+            result_info['fall_probability_value'] = float(prob)  # 添加数值概率
+            result_info['segment_results'] = segment_results  # 添加分段结果
             
             # 如果有标注数据，进行对比
             if ground_truth is not None:
@@ -482,6 +491,7 @@ def main():
                 if not gt_row.empty:
                     gt_has_fall = gt_row.iloc[0]['has_fall']
                     result_info['ground_truth'] = "跌倒" if gt_has_fall == 1 else "正常"
+                    result_info['ground_truth_value'] = int(gt_has_fall)  # 添加数值真实标签
                     result_info['is_correct'] = pred == gt_has_fall
                     
                     # 记录用于混淆矩阵
@@ -489,9 +499,16 @@ def main():
                     y_pred.append(pred)
                 else:
                     result_info['ground_truth'] = "未知"
+                    result_info['ground_truth_value'] = None
                     result_info['is_correct'] = None
         
         results.append(result_info)
+    
+    # 保存处理结果到JSON文件
+    json_output_path = os.path.join(args.output_dir, 'detection_results.json')
+    with open(json_output_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=4)
+    print(f"\n✓ 处理结果已保存到: {json_output_path}")
     
     # 打印所有视频的处理结果汇总
     print("\n" + "="*60)
@@ -533,6 +550,18 @@ def main():
         
         # 绘制混淆矩阵
         plot_confusion_matrix(y_true, y_pred, args.output_dir)
+        
+        # 保存评估指标到JSON文件
+        metrics = {
+            'accuracy': float(accuracy),
+            'correct_count': correct_count,
+            'total_count': total_count,
+            'classification_report': classification_report(y_true, y_pred, target_names=['正常', '跌倒'], output_dict=True)
+        }
+        metrics_json_path = os.path.join(args.output_dir, 'evaluation_metrics.json')
+        with open(metrics_json_path, 'w', encoding='utf-8') as f:
+            json.dump(metrics, f, ensure_ascii=False, indent=4)
+        print(f"\n✓ 评估指标已保存到: {metrics_json_path}")
 
 if __name__ == "__main__":
     main()
