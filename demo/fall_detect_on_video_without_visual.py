@@ -489,14 +489,14 @@ def main():
             if ground_truth is not None:
                 gt_row = ground_truth[ground_truth['video_id'] == video_name]
                 if not gt_row.empty:
-                    gt_has_fall = gt_row.iloc[0]['has_fall']
+                    gt_has_fall = gt_row.iloc[0]['has_fall']                    
                     result_info['ground_truth'] = "跌倒" if gt_has_fall == 1 else "正常"
                     result_info['ground_truth_value'] = int(gt_has_fall)  # 添加数值真实标签
-                    result_info['is_correct'] = pred == gt_has_fall
+                    result_info['is_correct'] = bool(pred == gt_has_fall)  # 确保是Python原生bool类型
                     
                     # 记录用于混淆矩阵
-                    y_true.append(gt_has_fall)
-                    y_pred.append(pred)
+                    y_true.append(int(gt_has_fall))  # 确保是Python原生int类型
+                    y_pred.append(int(pred))  # 确保是Python原生int类型
                 else:
                     result_info['ground_truth'] = "未知"
                     result_info['ground_truth_value'] = None
