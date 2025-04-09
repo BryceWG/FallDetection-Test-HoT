@@ -902,6 +902,33 @@ def evaluate_model(model, test_loader, criterion, device, save_dir='./checkpoint
     plt.xlabel('Predicted Label')
     plt.savefig(os.path.join(save_dir, 'confusion_matrix.png'))
     plt.close()
+
+    # 计算百分比混淆矩阵
+    conf_matrix_percent = conf_matrix.astype('float') / conf_matrix.sum(axis=1, keepdims=True)
+    conf_matrix_percent = np.nan_to_num(conf_matrix_percent)  # 处理除零
+
+    # 绘制百分比混淆矩阵
+    plt.figure(figsize=(8, 6))
+    plt.imshow(conf_matrix_percent, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix (Percentage)')
+    plt.colorbar()
+
+    plt.xticks(tick_marks, class_names)
+    plt.yticks(tick_marks, class_names)
+
+    # 在单元格中显示百分比
+    thresh_percent = conf_matrix_percent.max() / 2.
+    for i in range(conf_matrix_percent.shape[0]):
+        for j in range(conf_matrix_percent.shape[1]):
+            plt.text(j, i, "{:.2%}".format(conf_matrix_percent[i, j]),
+                     horizontalalignment="center",
+                     color="white" if conf_matrix_percent[i, j] > thresh_percent else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.savefig(os.path.join(save_dir, 'confusion_matrix_percent.png'))
+    plt.close()
     
     return results
 
