@@ -966,7 +966,7 @@ def process_args():
                        help='目标类别比例(跌倒:非跌倒),仅在balance_strategy不为none时有效')
     
     # 模型参数
-    parser.add_argument('--batch_size', type=int, default=16, help='批大小')
+    parser.add_argument('--batch_size', type=int, default=128, help='批大小')
     parser.add_argument('--num_epochs', type=int, default=80, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2正则化系数')
